@@ -29,7 +29,7 @@ jobs:
       - name: Install tooling
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy types-PyYAML PyYAML
+          pip install ruff mypy types-PyYAML PyYAML udsoncan
 
       - name: ruff check
         run: ruff check src tests
