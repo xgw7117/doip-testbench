@@ -1,0 +1,343 @@
+# UDS service conformance cases (ISO 14229-1).
+#
+# Format
+#   id:                unique identifier, also used as the pytest id
+#   request:           hex string sent inside a DoIP diagnostic message
+#   expected:          expected *prefix* of the positive response
+#   expected_nrc:      expected negative response code (0x7F SID NRC)
+#   expect_no_response: positive response was suppressed
+#   precondition:      session (0x01..0x04), unlock (security level 1), seed
+#   severity:          blocker | critical | normal | minor | trivial
+#
+# The suite is executed by tests/conformance/test_uds_conformance.py.
+
+meta:
+  title: UDS service conformance
+  standard: ISO 14229-1
+  ecu: virtual body control ECU
+
+cases:
+  # ---------------------------------------------------------------- 0x10
+  - id: UDS-SES-001
+    title: Default session switches to extended session
+    request: "10 03"
+    expected: "50 03 00 32 01 F4"
+    tags: [session, smoke]
+    severity: blocker
+
+  - id: UDS-SES-002
+    title: Extended session returns to default session
+    request: "10 01"
+    expected: "50 01"
+    precondition:
+      session: 0x03
+    tags: [session]
+    severity: critical
+
+  - id: UDS-SES-003
+    title: Programming session is supported
+    request: "10 02"
+    expected: "50 02"
+    tags: [session]
+    severity: critical
+
+  - id: UDS-SES-004
+    title: Suppress positive response bit is honoured
+    request: "10 83"
+    expect_no_response: true
+    tags: [session, suppress]
+    severity: normal
+
+  - id: UDS-SES-005
+    title: Unknown session type is rejected with 0x12
+    request: "10 05"
+    expected_nrc: 0x12
+    tags: [session, negative]
+    severity: critical
+
+  - id: UDS-SES-006
+    title: Truncated session control request is rejected with 0x13
+    request: "10"
+    expected_nrc: 0x13
+    tags: [session, negative]
+    severity: normal
+
+  # ---------------------------------------------------------------- 0x27
+  - id: UDS-SEC-001
+    title: Security access is not available in the default session
+    request: "27 01"
+    expected_nrc: 0x7F
+    tags: [security, negative]
+    severity: blocker
+
+  - id: UDS-SEC-002
+    title: Seed request returns a 4 byte seed
+    request: "27 01"
+    expected: "67 01"
+    precondition:
+      session: 0x03
+    tags: [security, smoke]
+    severity: blocker
+
+  - id: UDS-SEC-003
+    title: Wrong key is rejected with 0x35
+    request: "27 02 DE AD BE EF"
+    expected_nrc: 0x35
+    precondition:
+      session: 0x03
+      seed: true
+    tags: [security, negative]
+    severity: critical
+
+  - id: UDS-SEC-004
+    title: Send key without a preceding seed request yields 0x24
+    request: "27 02 DE AD BE EF"
+    expected_nrc: 0x24
+    precondition:
+      session: 0x03
+    tags: [security, negative]
+    severity: critical
+
+  - id: UDS-SEC-005
+    title: Seed request with trailing bytes is rejected with 0x13
+    request: "27 01 00"
+    expected_nrc: 0x13
+    precondition:
+      session: 0x03
+    tags: [security, negative]
+    severity: normal
+
+  - id: UDS-SEC-006
+    title: Unsupported security sub-function yields 0x12
+    request: "27 05"
+    expected_nrc: 0x12
+    precondition:
+      session: 0x03
+    tags: [security, negative]
+    severity: normal
+
+  - id: UDS-SEC-007
+    title: Seed request with suppress bit returns nothing
+    request: "27 81"
+    expect_no_response: true
+    precondition:
+      session: 0x03
+    tags: [security, suppress]
+    severity: minor
+
+  # ---------------------------------------------------------------- 0x22
+  - id: UDS-RDBI-001
+    title: VIN can be read with service 0x22
+    request: "22 F1 90"
+    expected: "62 F1 90 4C 53 56 41 41 32 42 4D 35 4E 32 31 32 33 34 35 36"
+    tags: [rdbi, smoke]
+    severity: blocker
+
+  - id: UDS-RDBI-002
+    title: Multiple DIDs are returned in request order
+    request: "22 F1 90 F1 87"
+    expected: "62 F1 90"
+    tags: [rdbi]
+    severity: critical
+
+  - id: UDS-RDBI-003
+    title: Unknown DID is rejected with 0x31
+    request: "22 12 34"
+    expected_nrc: 0x31
+    tags: [rdbi, negative]
+    severity: critical
+
+  - id: UDS-RDBI-004
+    title: One byte DID is rejected with 0x13
+    request: "22 F1"
+    expected_nrc: 0x13
+    tags: [rdbi, negative]
+    severity: normal
+
+  - id: UDS-RDBI-005
+    title: Odd number of DID bytes is rejected with 0x13
+    request: "22 F1 90 F1"
+    expected_nrc: 0x13
+    tags: [rdbi, negative]
+    severity: normal
+
+  - id: UDS-RDBI-006
+    title: Active diagnostic session DID reflects the current session
+    request: "22 F1 86"
+    expected: "62 F1 86 01"
+    tags: [rdbi]
+    severity: critical
+
+  - id: UDS-RDBI-007
+    title: Session DID reflects the extended session
+    request: "22 F1 86"
+    expected: "62 F1 86 03"
+    precondition:
+      session: 0x03
+    tags: [rdbi]
+    severity: normal
+
+  # ---------------------------------------------------------------- 0x2E
+  - id: UDS-WDBI-001
+    title: Writable DID accepts a new value in extended session
+    request: "2E 01 00 11 22 33 44 55 66 77 88"
+    expected: "6E 01 00"
+    precondition:
+      session: 0x03
+      unlock: true
+    tags: [wdbi, smoke]
+    severity: blocker
+
+  - id: UDS-WDBI-002
+    title: Write is rejected in the default session with 0x7F
+    request: "2E 01 00 11 22 33 44 55 66 77 88"
+    expected_nrc: 0x7F
+    tags: [wdbi, negative]
+    severity: critical
+
+  - id: UDS-WDBI-003
+    title: Write without security access yields 0x33
+    request: "2E 01 00 11 22 33 44 55 66 77 88"
+    expected_nrc: 0x33
+    precondition:
+      session: 0x03
+    tags: [wdbi, security, negative]
+    severity: blocker
+
+  - id: UDS-WDBI-004
+    title: Read only DID cannot be written even when unlocked
+    request: "2E F1 90 4C 53 56 41 41 32 42 4D 35 4E 32 31 32 33 34 35 36"
+    expected_nrc: 0x31
+    precondition:
+      session: 0x03
+      unlock: true
+    tags: [wdbi, negative]
+    severity: critical
+
+  - id: UDS-WDBI-005
+    title: Write with wrong payload length yields 0x13
+    request: "2E 01 00 00 00"
+    expected_nrc: 0x13
+    precondition:
+      session: 0x03
+      unlock: true
+    tags: [wdbi, negative]
+    severity: normal
+
+  - id: UDS-WDBI-006
+    title: Write to an unknown DID yields 0x31
+    request: "2E 12 34 00"
+    expected_nrc: 0x31
+    precondition:
+      session: 0x03
+      unlock: true
+    tags: [wdbi, negative]
+    severity: normal
+
+  # ---------------------------------------------------------------- 0x19
+  - id: UDS-DTC-001
+    title: DTC count with status mask 0xFF returns three records
+    request: "19 01 FF"
+    expected: "59 01 FF 01 00 03"
+    tags: [dtc, smoke]
+    severity: blocker
+
+  - id: UDS-DTC-002
+    title: DTC list with status mask 0xFF starts with the confirmed DTC
+    request: "19 02 FF"
+    expected: "59 02 FF C1 23 45 09"
+    tags: [dtc]
+    severity: blocker
+
+  - id: UDS-DTC-003
+    title: Supported DTC list contains all stored DTCs
+    request: "19 0A"
+    expected: "59 0A FF"
+    tags: [dtc]
+    severity: critical
+
+  - id: UDS-DTC-004
+    title: Snapshot record of DTC 0xC12345 is readable
+    request: "19 04 C1 23 45 01"
+    expected: "59 04 C1 23 45 09 01"
+    tags: [dtc]
+    severity: critical
+
+  - id: UDS-DTC-005
+    title: Extended data record of DTC 0xC12345 is readable
+    request: "19 06 C1 23 45 01"
+    expected: "59 06 C1 23 45 09 01 01 2C 00 64"
+    tags: [dtc]
+    severity: normal
+
+  - id: UDS-DTC-006
+    title: Status mask 0x08 filters out pending DTCs
+    request: "19 02 08"
+    expected: "59 02 08 C1 23 45 09 01 23 45 08"
+    tags: [dtc, filter]
+    severity: critical
+
+  - id: UDS-DTC-007
+    title: Status mask 0x00 matches no DTC
+    request: "19 02 00"
+    expected: "59 02 00"
+    tags: [dtc, filter]
+    severity: normal
+
+  - id: UDS-DTC-008
+    title: Unsupported report type yields 0x12
+    request: "19 03 FF"
+    expected_nrc: 0x12
+    tags: [dtc, negative]
+    severity: normal
+
+  - id: UDS-DTC-009
+    title: DTC report without status mask yields 0x13
+    request: "19 02"
+    expected_nrc: 0x13
+    tags: [dtc, negative]
+    severity: normal
+
+  - id: UDS-DTC-010
+    title: Snapshot request for an unknown DTC yields 0x31
+    request: "19 04 AA BB CC 01"
+    expected_nrc: 0x31
+    tags: [dtc, negative]
+    severity: normal
+
+  - id: UDS-DTC-011
+    title: DTC report with suppress bit returns nothing
+    request: "19 81 FF"
+    expect_no_response: true
+    tags: [dtc, suppress]
+    severity: minor
+
+  # ---------------------------------------------------------------- 0x3E
+  - id: UDS-TP-001
+    title: Tester present is acknowledged
+    request: "3E 00"
+    expected: "7E 00"
+    tags: [tester-present]
+    severity: critical
+
+  - id: UDS-TP-002
+    title: Tester present with suppress bit returns nothing
+    request: "3E 80"
+    expect_no_response: true
+    tags: [tester-present, suppress]
+    severity: normal
+
+  - id: UDS-TP-003
+    title: Unknown tester present sub-function yields 0x12
+    request: "3E 01"
+    expected_nrc: 0x12
+    tags: [tester-present, negative]
+    severity: minor
+
+  # ---------------------------------------------------------------- generic
+  - id: UDS-GEN-001
+    title: Unsupported service yields 0x11
+    request: "31 01 02 03"
+    expected_nrc: 0x11
+    tags: [generic, negative]
+    severity: critical
