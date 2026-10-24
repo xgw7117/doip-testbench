@@ -1,4 +1,5 @@
 """共享 pytest 夹具。"""
+
 from __future__ import annotations
 
 import socket
