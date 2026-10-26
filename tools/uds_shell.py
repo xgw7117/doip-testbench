@@ -1,4 +1,6 @@
 """交互式 UDS 终端，带 TesterPresent 保活。"""
+
+import contextlib
 import threading
 import time
 
@@ -14,11 +16,8 @@ running = True
 def keep_alive() -> None:
     while running:
         time.sleep(2)
-        with lock:
-            try:
-                client.request_uds(b"\x3e\x00", timeout=1)
-            except Exception:
-                pass
+        with lock, contextlib.suppress(Exception):
+            client.request_uds(b"\x3e\x00", timeout=1)
 
 
 threading.Thread(target=keep_alive, daemon=True).start()

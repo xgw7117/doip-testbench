@@ -58,12 +58,17 @@ class _Connection:
     sock: socket.socket
     peer: tuple[str, int]
     routing: RoutingState = field(default_factory=RoutingState)
-    uds: UdsServer = field(init=False)
+    uds_map: dict[int, UdsServer] = field(init=False)
     parser: DoIPFrameParser = field(init=False)
+
     _send_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
-        self.uds = UdsServer(self.server.config, self.server.state)
+        config = self.server.config
+        addresses = config.routing_table or {config.logical_address: "ecu"}
+        self.uds_map = {
+            address: UdsServer(config, self.server.state_for(address)) for address in addresses
+        }
         self.parser = DoIPFrameParser(max_payload_size=self.server.max_payload_size)
 
     # ------------------------------------------------------------------ loop
@@ -244,9 +249,11 @@ class _Connection:
         if source != self.routing.client_address:
             self._send_diagnostic_nack(source, target, DiagnosticNackCode.INVALID_SOURCE_ADDRESS)
             return
-        if target != self.server.config.logical_address:
+        uds = self.uds_map.get(target)
+        if uds is None:
             self._send_diagnostic_nack(source, target, DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS)
             return
+
         if len(uds_request) > self.server.config.max_data_size:
             self._send_diagnostic_nack(
                 source, target, DiagnosticNackCode.DIAGNOSTIC_MESSAGE_TOO_LARGE
@@ -256,15 +263,16 @@ class _Connection:
             self._send_diagnostic_nack(source, target, DiagnosticNackCode.TRANSPORT_PROTOCOL_ERROR)
             return
 
-        uds_response = self.uds.handle(uds_request)
+        uds_response = uds.handle(uds_request)
         if not uds_response:
             return  # positive response suppressed by the tester
 
         response = (
-            self.server.config.logical_address.to_bytes(2, "big")
+            target.to_bytes(2, "big")
             + self.routing.client_address.to_bytes(2, "big")
             + uds_response
         )
+
         self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
 
     # -------------------------------------------------------------- tx helpers
@@ -294,7 +302,7 @@ class DoIPServer:
         max_payload_size: int = 65536,
     ) -> None:
         self.config = config or default_config()
-        self.state = EcuState(self.config)
+        self._states: dict[int, EcuState] = {}
         self.max_payload_size = max_payload_size
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -355,9 +363,16 @@ class DoIPServer:
         with self._lock:
             return len(self._connections)
 
+    def state_for(self, logical_address: int) -> EcuState:
+        """Return the state of one ECU, creating it on first use."""
+        if logical_address not in self._states:
+            self._states[logical_address] = EcuState(self.config)
+        return self._states[logical_address]
+
     def reset_state(self) -> None:
         """Restore DID values and DTCs to their factory defaults."""
-        self.state.reset()
+        for state in self._states.values():
+            state.reset()
 
     # ------------------------------------------------------------- internals
     def _accept_loop(self) -> None:

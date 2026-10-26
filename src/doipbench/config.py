@@ -81,6 +81,9 @@ class EcuConfig:
     s3_ms: int = 5000
     #: ``None`` accepts any tester address except 0x0000.
     allowed_testers: frozenset[int] | None = None
+    #: Gateway mode: logical address -> ECU name.  Empty means direct connection.
+    routing_table: dict[int, str] = field(default_factory=dict)
+
     security: SecurityConfig = field(default_factory=SecurityConfig)
     dids: dict[int, DidDefinition] = field(default_factory=dict)
     dtcs: list[DtcDefinition] = field(default_factory=list)

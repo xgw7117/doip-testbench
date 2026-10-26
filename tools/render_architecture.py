@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 # Matplotlib cannot index .ttc collections by family name, so register the
 # faces explicitly.  The JP face covers all simplified Chinese glyphs used here.
@@ -110,11 +110,20 @@ def main() -> None:
     # ---------------------------------------------------------- test layer
     box(ax, 6, 47, 82, 12.4, facecolor=FILL_TEST)
     label(ax, 9, 56.6, "测试与编排层", size=11, weight="bold", color=ACCENT)
-    label(ax, 9, 51.2, "YAML 用例（41）  ·  pytest 数据驱动  ·  Allure 报告  ·  CLI（serve / run / identify / frame）", size=9.2, color=MUTED)
+    label(
+        ax,
+        9,
+        51.2,
+        "YAML 用例（41）  ·  pytest 数据驱动  ·  Allure 报告  ·  CLI（serve / run / identify / frame）",
+        size=9.2,
+        color=MUTED,
+    )
 
     # ------------------------------------------------------- protocol layer
     box(ax, 6, 25.5, 82, 18.5, facecolor=FILL_PROTO)
-    label(ax, 9, 40.6, "协议栈层 · 自研实现，按标准逐字节可断言", size=11, weight="bold", color=BLUE)
+    label(
+        ax, 9, 40.6, "协议栈层 · 自研实现，按标准逐字节可断言", size=11, weight="bold", color=BLUE
+    )
 
     tiles = [
         (9.5, "DoIP", "ISO 13400-2\n帧编解码 / 路由激活\n流式分帧"),
@@ -130,8 +139,22 @@ def main() -> None:
     # -------------------------------------------------------- transport layer
     box(ax, 6, 6.5, 82, 15.0, facecolor=FILL_TRANS)
     label(ax, 9, 18.4, "传输与仿真层", size=11, weight="bold", color=ACCENT)
-    label(ax, 9, 13.6, "TCP :13400 诊断  ·  UDP 车辆发现  ·  多线程连接 / 并发 socket 限制", size=9.0, color=MUTED)
-    label(ax, 9, 9.6, "ECU 状态机：DID 内存 · DTC 存储 · 会话 S3 · 安全访问尝试次数与锁定", size=9.0, color=MUTED)
+    label(
+        ax,
+        9,
+        13.6,
+        "TCP :13400 诊断  ·  UDP 车辆发现  ·  多线程连接 / 并发 socket 限制",
+        size=9.0,
+        color=MUTED,
+    )
+    label(
+        ax,
+        9,
+        9.6,
+        "ECU 状态机：DID 内存 · DTC 存储 · 会话 S3 · 安全访问尝试次数与锁定",
+        size=9.0,
+        color=MUTED,
+    )
 
     # ------------------------------------------------------------------ CI
     box(ax, 92, 6.5, 22, 53, facecolor=FILL_CI)
