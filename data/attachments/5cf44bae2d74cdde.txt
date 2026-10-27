@@ -1,0 +1,1 @@
+WARNING  doipbench.doip.server:server.py:107 protocol error from 127.0.0.1:43194: version 0x02 / inverse 0x00 do not complement

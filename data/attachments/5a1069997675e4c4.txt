@@ -1,0 +1,1 @@
+error: non-hexadecimal number found in fromhex() arg at position 0

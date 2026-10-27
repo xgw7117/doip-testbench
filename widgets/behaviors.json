@@ -1,0 +1,1 @@
+{"total":93,"items":[{"uid":"123d16a3bce049e8e61261647c6ba652","name":"DoIP conformance","statistic":{"failed":0,"broken":0,"skipped":0,"passed":10,"unknown":0,"total":10}},{"uid":"ba7103c4dc45790914084ed0d38c93d7","name":"UDS conformance","statistic":{"failed":0,"broken":0,"skipped":0,"passed":1,"unknown":0,"total":1}}]}
