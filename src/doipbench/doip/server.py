@@ -365,13 +365,18 @@ class DoIPServer:
 
     def state_for(self, logical_address: int) -> EcuState:
         """Return the state of one ECU, creating it on first use."""
-        if logical_address not in self._states:
-            self._states[logical_address] = EcuState(self.config)
-        return self._states[logical_address]
+        with self._lock:
+            state = self._states.get(logical_address)
+            if state is None:
+                state = EcuState(self.config)
+                self._states[logical_address] = state
+            return state
 
     def reset_state(self) -> None:
         """Restore DID values and DTCs to their factory defaults."""
-        for state in self._states.values():
+        with self._lock:
+            states = list(self._states.values())
+        for state in states:
             state.reset()
 
     # ------------------------------------------------------------- internals

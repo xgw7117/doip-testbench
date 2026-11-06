@@ -198,7 +198,14 @@ class UdsServer:
         return b"" if suppress else self._positive(ServiceId.SECURITY_ACCESS, sub)
 
     def _is_locked_out(self) -> bool:
-        return self._clock() < self.lockout_until
+        now = self._clock()
+        if now < self.lockout_until:
+            return True
+        if self.lockout_until:
+            # 窗口已过：重新给满 max_attempts，否则错一次就再锁一轮。
+            self.failed_attempts = 0
+            self.lockout_until = 0.0
+        return False
 
     # ---------------------------------------------------------------- 0x22
     def _read_data_by_identifier(self, request: bytes) -> bytes:

@@ -239,3 +239,80 @@ def test_open_sockets_are_capped():
         for s in socks:
             s.close()
         srv.stop()
+
+
+def test_lockout_window_expiry_restores_attempts():
+    """锁定窗口结束后要重新给满次数，否则失败一次就又锁一轮。"""
+    from doipbench.config import default_config
+    from doipbench.uds.server import UdsServer
+
+    srv = UdsServer(default_config())
+    srv.handle(bytes([0x10, 0x03]))
+    for _ in range(3):
+        srv.handle(bytes([0x27, 0x01]))
+        srv.handle(bytes([0x27, 0x02]) + b"\x00\x00\x00\x00")
+    assert srv.handle(bytes([0x27, 0x01])) == bytes([0x7F, 0x27, 0x37])
+
+    srv.lockout_until = 1.0  # 一个早已过去的时间点，触发窗口过期
+    srv.handle(bytes([0x27, 0x01]))
+    srv.handle(bytes([0x27, 0x02]) + b"\x00\x00\x00\x00")
+    assert srv.failed_attempts == 1, "窗口过后应重新计数"
+
+
+def test_report_supported_dtc_has_no_count_field():
+    """0x19 0A 是 availabilityMask + 记录，没有 DTCCount；0x19 01 才有。"""
+    from doipbench.config import default_config
+    from doipbench.uds.server import UdsServer
+
+    cfg = default_config()
+    srv = UdsServer(cfg)
+    resp = srv.handle(bytes([0x19, 0x0A]))
+    assert resp[0:2] == bytes([0x59, 0x0A])
+    assert resp[2] == cfg.dtc_status_availability_mask
+    body = resp[3:]
+    assert len(body) % 4 == 0
+
+    count_resp = srv.handle(bytes([0x19, 0x01, 0xFF]))
+    assert count_resp[0:2] == bytes([0x59, 0x01])
+    assert int.from_bytes(count_resp[4:6], "big") * 4 == len(body)
+
+
+def test_state_for_creates_only_one_state_under_concurrency(monkeypatch):
+    """并发首次访问同一地址，只能创建一个 EcuState。"""
+    import threading
+    import time
+
+    from doipbench.config import default_config
+    from doipbench.doip import server as server_mod
+    from doipbench.doip.server import DoIPServer
+
+    srv = DoIPServer(default_config(), port=0)
+    real = server_mod.EcuState
+    created = []
+
+    def slow(config):
+        obj = real(config)
+        created.append(obj)
+        time.sleep(0.01)
+        return obj
+
+    monkeypatch.setattr(server_mod, "EcuState", slow)
+
+    barrier = threading.Barrier(8)
+    results = []
+    guard = threading.Lock()
+
+    def worker():
+        barrier.wait()
+        st = srv.state_for(0x1001)
+        with guard:
+            results.append(st)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(created) == 1
+    assert len({id(r) for r in results}) == 1
