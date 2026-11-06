@@ -197,22 +197,23 @@ def test_reset_restores_factory_state(server: UdsServer) -> None:
     assert server.session is Session.DEFAULT
     assert server.security_level == 0
     assert server.handle(b"\x22\x01\x00") == b"\x62\x01\x00" + bytes(8)
-    
+
+
 def test_lockout_must_survive_session_change():
     """锁定不能因为切会话而解除，否则 max_attempts 形同虚设。"""
     from doipbench.config import default_config
     from doipbench.uds.server import UdsServer
 
     srv = UdsServer(default_config())
-    srv.handle(bytes([0x10, 0x03]))          # 进扩展会话
+    srv.handle(bytes([0x10, 0x03]))  # 进扩展会话
 
-    for _ in range(3):                       # 连续错 3 次
-        srv.handle(bytes([0x27, 0x01]))      #   要种子
+    for _ in range(3):  # 连续错 3 次
+        srv.handle(bytes([0x27, 0x01]))  #   要种子
         srv.handle(bytes([0x27, 0x02]) + b"\x00\x00\x00\x00")
 
     assert srv.handle(bytes([0x27, 0x01])) == bytes([0x7F, 0x27, 0x37])
 
-    srv.handle(bytes([0x10, 0x03]))          # 关键：切会话
+    srv.handle(bytes([0x10, 0x03]))  # 关键：切会话
 
     assert srv.handle(bytes([0x27, 0x01])) == bytes([0x7F, 0x27, 0x37])
 
