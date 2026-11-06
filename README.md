@@ -2,7 +2,7 @@
 
 一个用 Python 写的车载诊断练习项目：虚拟 ECU + 一套 pytest 测试用例。
 
-虚拟 ECU 监听 TCP 13400，能响应 DoIP 的车辆识别、路由激活和诊断消息，支持 UDS 的 0x10 / 0x27 / 0x22 / 0x2E / 0x19 五个服务。测试用例不需要 CANoe 或真实硬件，clone 下来装个依赖就能跑。
+虚拟 ECU 监听 TCP 13400，能响应 DoIP 的车辆识别、路由激活和诊断消息，支持 UDS 的 0x10 / 0x27 / 0x22 / 0x2E / 0x19 / 0x3E 六个服务；并实现按目标地址转发的网关模式，把诊断请求路由到不同 ECU、改写回程的源/目标地址。测试用例不需要 CANoe 或真实硬件，clone 下来装个依赖就能跑。
 
 [![CI](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml/badge.svg)](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org)
@@ -12,8 +12,8 @@
 
 | 协议 | 做了什么 |
 | --- | --- |
-| DoIP（ISO 13400-2） | 8 字节头解析与组帧、车辆识别、路由激活、Alive Check、实体状态、0x8001 / 0x8003 |
-| UDS（ISO 14229-1） | 0x10 会话、0x27 安全访问、0x22 读数据、0x2E 写数据、0x19 读 DTC，以及常见 NRC |
+| DoIP（ISO 13400-2） | 8 字节头解析与组帧、车辆识别、路由激活、Alive Check、实体状态、0x8001 / 0x8003；网关模式按目标地址转发，未知目标回 0x8003 + NACK 0x02 |
+| UDS（ISO 14229-1） | 0x10 会话、0x27 安全访问、0x22 读数据、0x2E 写数据、0x19 读 DTC、0x3E TesterPresent，以及常见 NRC |
 | SOME/IP | 头部和 SD 报文的编解码，**没有做服务端** |
 | gPTP / VLAN | IEEE 802.1AS 头部解析、802.1Q 标签 |
 | ISO-TP（ISO 15765-2） | 分段和重组，用于理解 CAN 侧的长报文传输 |
@@ -41,13 +41,12 @@ doipbench run tests/data/uds_cases.yaml --start-ecu --port 0
 
 ## 测试
 
-一共 155 条：
+一共 171 条：
 
-- 单元测试 77 条，测编解码和状态机，不碰网络
+- 单元测试 89 条，测编解码和状态机，不碰网络
 - 协议一致性 68 条，其中 41 条 UDS 服务用例写在 YAML 里，27 条是 DoIP 协议用例
-- 端到端 10 条，测会话超时、安全锁定、两个 tester 同时连接这些
+- 端到端 14 条，测会话超时、安全锁定、两个 tester 同时连接、空连接上限这些
 
-覆盖率 88%。GitHub Actions 上用 Python 3.10 / 3.11 / 3.12 各跑一遍。
 
 用例写在 `tests/data/uds_cases.yaml`，加一条不用改代码：
 
@@ -65,7 +64,7 @@ doipbench run tests/data/uds_cases.yaml --start-ecu --port 0
 ```
 src/doipbench/
 ├── doip/         帧解析、服务端、客户端
-├── uds/          五个服务、会话与安全状态机
+├── uds/          六个服务、会话与安全状态机
 ├── someip/       SOME/IP 头 + SD
 ├── net/          VLAN、gPTP
 ├── transport/    ISO-TP
