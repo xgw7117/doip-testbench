@@ -108,8 +108,7 @@ class UdsServer:
         self.session = Session.DEFAULT
         self.security_level = 0
         self.pending_seed = None
-        self.failed_attempts = 0
-        self.lockout_until = 0.0
+        
 
     def _expire_session(self, now: float) -> None:
         if self.session is Session.DEFAULT:

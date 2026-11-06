@@ -383,6 +383,12 @@ class DoIPServer:
                 continue
             except OSError:
                 break
+            with self._lock:
+                over_limit = len(self._connections) >= self.config.max_open_sockets
+            if over_limit:
+                with contextlib.suppress(OSError):
+                    client.close()
+                continue
             client.settimeout(0.2)
             connection = _Connection(self, client, peer)
             with self._lock:

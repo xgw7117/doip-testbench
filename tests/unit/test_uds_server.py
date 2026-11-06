@@ -197,3 +197,44 @@ def test_reset_restores_factory_state(server: UdsServer) -> None:
     assert server.session is Session.DEFAULT
     assert server.security_level == 0
     assert server.handle(b"\x22\x01\x00") == b"\x62\x01\x00" + bytes(8)
+    
+def test_lockout_must_survive_session_change():
+    """锁定不能因为切会话而解除，否则 max_attempts 形同虚设。"""
+    from doipbench.config import default_config
+    from doipbench.uds.server import UdsServer
+
+    srv = UdsServer(default_config())
+    srv.handle(bytes([0x10, 0x03]))          # 进扩展会话
+
+    for _ in range(3):                       # 连续错 3 次
+        srv.handle(bytes([0x27, 0x01]))      #   要种子
+        srv.handle(bytes([0x27, 0x02]) + b"\x00\x00\x00\x00")
+
+    assert srv.handle(bytes([0x27, 0x01])) == bytes([0x7F, 0x27, 0x37])
+
+    srv.handle(bytes([0x10, 0x03]))          # 关键：切会话
+
+    assert srv.handle(bytes([0x27, 0x01])) == bytes([0x7F, 0x27, 0x37])
+
+
+def test_open_sockets_are_capped():
+    """未激活的连接也必须设上限，否则一条脚本就能把线程和句柄耗尽。"""
+    import socket
+    import time
+
+    from doipbench.config import default_config
+    from doipbench.doip.server import DoIPServer
+
+    cfg = default_config()
+    cfg.max_open_sockets = 4
+    srv = DoIPServer(cfg, port=0).start()
+    socks = []
+    try:
+        for _ in range(10):
+            socks.append(socket.create_connection(("127.0.0.1", srv.port)))
+        time.sleep(0.5)
+        assert srv.open_sockets() <= 4
+    finally:
+        for s in socks:
+            s.close()
+        srv.stop()

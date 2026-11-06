@@ -75,6 +75,8 @@ class EcuConfig:
     eid: bytes = bytes.fromhex("001122334455")
     gid: bytes = bytes.fromhex("AABBCCDDEEFF")
     max_concurrent_sockets: int = 3
+    #: 同时存在的 TCP 连接硬上限（含未激活），防止空连接耗尽线程与句柄。
+    max_open_sockets: int = 16
     max_data_size: int = 4096
     p2_ms: int = 50
     p2_star_ms: int = 5000
