@@ -105,10 +105,10 @@ class UdsServer:
 
     # ------------------------------------------------------------- internals
     def _reset_to_default(self) -> None:
+        # 故意不重置 failed_attempts / lockout_until：切会话不能解除安全锁定。
         self.session = Session.DEFAULT
         self.security_level = 0
         self.pending_seed = None
-        
 
     def _expire_session(self, now: float) -> None:
         if self.session is Session.DEFAULT:
