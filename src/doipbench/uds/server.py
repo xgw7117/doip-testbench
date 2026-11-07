@@ -533,9 +533,7 @@ class UdsServer:
 
         if self._suppress(raw):
             return b""
-        return self._positive(
-            ServiceId.ROUTINE_CONTROL, sub, routine.to_bytes(2, "big") + body
-        )
+        return self._positive(ServiceId.ROUTINE_CONTROL, sub, routine.to_bytes(2, "big") + body)
 
     def _erase(self, params: bytes) -> bytes:
         """31 01 FF00：不带参数擦整片，带 8 字节则擦指定 [地址, 长度]。"""

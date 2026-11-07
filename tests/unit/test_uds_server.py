@@ -6,8 +6,9 @@ just request bytes in and response bytes out.
 
 from __future__ import annotations
 
-import pytest
 import zlib
+
+import pytest
 
 from doipbench.config import SecurityConfig, default_config
 from doipbench.uds import NegativeResponseCode as NRC
@@ -333,7 +334,6 @@ def test_dtc_by_status_reports_availability_mask_not_request_mask(server: UdsSer
     """0x19 02 同上：首字节恒为 availability mask，与请求 mask 无关。"""
     response = server.handle(b"\x19\x02\x00")
     assert response[:3] == b"\x59\x02\xff"
-
 
 
 # ------------------------------------------------------------------ 0x34/36/37

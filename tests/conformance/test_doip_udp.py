@@ -174,8 +174,6 @@ def test_udp_endpoint_works_when_bound_to_wildcard_address() -> None:
     """
     with DoIPServer(default_config(), host="0.0.0.0") as srv:
         assert srv.host == "0.0.0.0"
-        reply = exchange(
-            srv.port, DoIPFrame(PayloadType.VEHICLE_IDENTIFICATION_REQUEST).encode()
-        )
+        reply = exchange(srv.port, DoIPFrame(PayloadType.VEHICLE_IDENTIFICATION_REQUEST).encode())
         assert reply is not None, "wildcard-bound UDP endpoint did not answer"
         assert decode_frame(reply).payload_type == PayloadType.VEHICLE_ANNOUNCEMENT
