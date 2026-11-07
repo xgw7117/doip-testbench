@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import time
+import zlib
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from ..config import DidDefinition, DtcDefinition, EcuConfig
 from .constants import (
@@ -30,6 +32,21 @@ from .state import EcuState
 logger = logging.getLogger(__name__)
 
 Handler = Callable[[bytes], bytes]
+
+
+@dataclass
+class _Download:
+    """一次 0x34 → 0x36* → 0x37 刷写事务的连接级状态。
+
+    next_counter 不是"已收到几块"，而是要 tester 下一块用的
+    blockSequenceCounter：从 0x01 开始，0xFF 之后回 0x00，0x00 之后回 0x01。
+    拿"块数"去比对是这块最常见的实现错误。
+    """
+
+    address: int
+    size: int
+    data: bytearray = field(default_factory=bytearray)
+    next_counter: int = 0x01
 
 
 class UdsNegativeResponse(Exception):
@@ -65,6 +82,9 @@ class UdsServer:
         self.pending_seed: bytes | None = None
         self.last_activity = clock()
         self._seeds = SeedGenerator(config.security)
+        self._download: _Download | None = None
+        #: 懒分配：只有真发起 0x34 才占这块内存。
+        self._flash: bytearray | None = None
         self._handlers: dict[int, Handler] = {
             ServiceId.DIAGNOSTIC_SESSION_CONTROL: self._diagnostic_session_control,
             ServiceId.SECURITY_ACCESS: self._security_access,
@@ -72,6 +92,11 @@ class UdsServer:
             ServiceId.WRITE_DATA_BY_IDENTIFIER: self._write_data_by_identifier,
             ServiceId.READ_DTC_INFORMATION: self._read_dtc_information,
             ServiceId.TESTER_PRESENT: self._tester_present,
+            ServiceId.REQUEST_DOWNLOAD: self._request_download,
+            ServiceId.TRANSFER_DATA: self._transfer_data,
+            ServiceId.REQUEST_TRANSFER_EXIT: self._request_transfer_exit,
+            ServiceId.ECU_RESET: self._ecu_reset,
+            ServiceId.ROUTINE_CONTROL: self._routine_control,
         }
 
     # ------------------------------------------------------------- public API
@@ -109,6 +134,8 @@ class UdsServer:
         self.session = Session.DEFAULT
         self.security_level = 0
         self.pending_seed = None
+        # 切会话等于中断刷写：留下半截事务会让下一块数据拼到旧地址上。
+        self._download = None
 
     def _expire_session(self, now: float) -> None:
         if self.session is Session.DEFAULT:
@@ -287,15 +314,16 @@ class UdsServer:
     def _report_dtc_count(self, request: bytes) -> bytes:
         if len(request) != 3:
             raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
-        mask = request[2]
-        count = len(self.state.dtcs(mask))
-        return bytes([mask, 0x01]) + count.to_bytes(2, "big")
+        # 响应首字节是服务端支持哪些 status bit，跟请求 mask 无关。
+        available = self.config.dtc_status_availability_mask
+        count = len(self.state.dtcs(request[2]))
+        return bytes([available, 0x01]) + count.to_bytes(2, "big")
 
     def _report_dtc_by_status(self, request: bytes) -> bytes:
         if len(request) != 3:
             raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
-        mask = request[2]
-        return bytes([mask]) + self._dtc_records(self.state.dtcs(mask))
+        available = self.config.dtc_status_availability_mask
+        return bytes([available]) + self._dtc_records(self.state.dtcs(request[2]))
 
     def _report_supported_dtc(self, request: bytes) -> bytes:
         if len(request) != 2:
@@ -353,3 +381,192 @@ class UdsServer:
         if self._suppress(raw):
             return b""
         return self._positive(ServiceId.TESTER_PRESENT, 0x00)
+
+    # ---------------------------------------------------------------- 0x34
+    def _request_download(self, request: bytes) -> bytes:
+        """RequestDownload：告诉 tester「往哪写、写多少、一块最大多少」。
+
+        真实刷写序列比这里长（写指纹、31 01 FF00 擦除、37 之后还要 31 01
+        FF01 校验、11 01 复位）。这里只做数据传输这一段，擦除和校验当作
+        外部已经完成——边界写在 README 里，不假装全做了。
+        """
+        self._require_programming()
+        if len(request) < 3:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        if self._download is not None:
+            # 上一个事务没 37 就再来一次 34：先 37 或切会话。
+            raise UdsNegativeResponse(NRC.REQUEST_SEQUENCE_ERROR)
+
+        if request[1] != 0x00:
+            # dataFormatIdentifier 非 0 表示压缩或加密，本实现都不支持。
+            raise UdsNegativeResponse(NRC.REQUEST_OUT_OF_RANGE)
+
+        alfid = request[2]
+        address_length = alfid & 0x0F
+        size_length = alfid >> 4
+        if address_length == 0 or size_length == 0:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        if len(request) != 3 + address_length + size_length:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+
+        address = int.from_bytes(request[3 : 3 + address_length], "big")
+        size = int.from_bytes(request[3 + address_length :], "big")
+        if size == 0 or address + size > self.config.flash_size:
+            raise UdsNegativeResponse(NRC.REQUEST_OUT_OF_RANGE)
+
+        self._download = _Download(address=address, size=size)
+        logger.debug("download 0x%X..0x%X", address, address + size)
+        return self._positive(
+            ServiceId.REQUEST_DOWNLOAD,
+            0x20,  # lengthFormatIdentifier：后面 2 字节是 maxNumberOfBlockLength
+            self.config.max_block_length.to_bytes(2, "big"),
+        )
+
+    # ---------------------------------------------------------------- 0x36
+    def _transfer_data(self, request: bytes) -> bytes:
+        self._require_programming()
+        if self._download is None:
+            raise UdsNegativeResponse(NRC.REQUEST_SEQUENCE_ERROR)
+        if len(request) < 3:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        if len(request) > self.config.max_block_length:
+            raise UdsNegativeResponse(NRC.TRANSFER_DATA_SUSPENDED)
+
+        counter = request[1]
+        if counter != self._download.next_counter:
+            # 丢块 / 重发 / 乱序都落到这里。tester 见到 0x73 要从该块重发。
+            raise UdsNegativeResponse(NRC.WRONG_BLOCK_SEQUENCE_COUNTER)
+
+        chunk = request[2:]
+        if len(self._download.data) + len(chunk) > self._download.size:
+            # 超出 0x34 声明的长度：不截断，直接挂起，让 tester 知道算错了。
+            raise UdsNegativeResponse(NRC.TRANSFER_DATA_SUSPENDED)
+
+        self._download.data.extend(chunk)
+        self._download.next_counter = (counter + 1) & 0xFF
+        return self._positive(ServiceId.TRANSFER_DATA, counter)
+
+    # ---------------------------------------------------------------- 0x37
+    def _request_transfer_exit(self, request: bytes) -> bytes:
+        self._require_programming()
+        if self._download is None:
+            raise UdsNegativeResponse(NRC.REQUEST_SEQUENCE_ERROR)
+        if len(request) != 1:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+
+        download = self._download
+        if len(download.data) != download.size:
+            # 少传了：不写进去，也不悄悄当成功。
+            raise UdsNegativeResponse(NRC.REQUEST_SEQUENCE_ERROR)
+
+        flash = self._ensure_flash()
+        flash[download.address : download.address + download.size] = download.data
+        self._download = None
+        logger.debug("flashed %d bytes at 0x%X", download.size, download.address)
+        return self._positive(ServiceId.REQUEST_TRANSFER_EXIT)
+
+    def _ensure_flash(self) -> bytearray:
+        """懒分配刷写区：只有真擦或真写才占这块内存。"""
+        if self._flash is None:
+            self._flash = bytearray(self.config.flash_size)
+        return self._flash
+
+    def _require_programming(self) -> None:
+        """三个刷写服务的共同前置条件：编程会话 + 已解锁。"""
+        if self.session is not Session.PROGRAMMING:
+            raise UdsNegativeResponse(NRC.SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION)
+        if not self.security_level:
+            raise UdsNegativeResponse(NRC.SECURITY_ACCESS_DENIED)
+
+    # ------------------------------------------------------------- 内部查询
+    def flash_image(self) -> bytes:
+        """返回刷写区内容，供测试断言写入结果。"""
+        if self._flash is None:
+            return bytes(self.config.flash_size)
+        return bytes(self._flash)
+
+    # ---------------------------------------------------------------- 0x11
+    def _ecu_reset(self, request: bytes) -> bytes:
+        if len(request) != 2:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        raw = request[1]
+        sub = raw & SUB_FUNCTION_MASK
+        if sub not in (0x01, 0x03):
+            raise UdsNegativeResponse(NRC.SUB_FUNCTION_NOT_SUPPORTED)
+
+        self._reset_to_default()
+        # 复位等于重新上电：会话回默认、安全锁上、半截刷写事务丢掉。
+        # 计数器也清零——这是真实 ECU 的已知弱点（断电就能绕过 0x27 锁定），
+        # 生产项目把计数写进 NVM，这里没有 NVM，如实按"重启清零"实现。
+        self.failed_attempts = 0
+        self.lockout_until = 0.0
+        self._seeds.reset()
+        self.last_activity = self._clock()
+        if self._suppress(raw):
+            return b""
+        return self._positive(ServiceId.ECU_RESET, sub)
+
+    # ---------------------------------------------------------------- 0x31
+    def _routine_control(self, request: bytes) -> bytes:
+        """RoutineControl：这里只实现刷写用的 FF00 擦除和 FF01 校验。
+
+        只支持 startRoutine（子功能 01）。stop（02）和 requestResults（03）
+        回 0x12——不是忘了，是这两条在刷写序列里用不到，做了也没有用例能验证。
+        """
+        self._require_programming()
+        if len(request) < 4:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+
+        raw = request[1]
+        sub = raw & SUB_FUNCTION_MASK
+        if sub != 0x01:
+            raise UdsNegativeResponse(NRC.SUB_FUNCTION_NOT_SUPPORTED)
+
+        routine = int.from_bytes(request[2:4], "big")
+        params = request[4:]
+        if routine == 0xFF00:
+            body = self._erase(params)
+        elif routine == 0xFF01:
+            body = self._verify(params)
+        else:
+            raise UdsNegativeResponse(NRC.REQUEST_OUT_OF_RANGE)
+
+        if self._suppress(raw):
+            return b""
+        return self._positive(
+            ServiceId.ROUTINE_CONTROL, sub, routine.to_bytes(2, "big") + body
+        )
+
+    def _erase(self, params: bytes) -> bytes:
+        """31 01 FF00：不带参数擦整片，带 8 字节则擦指定 [地址, 长度]。"""
+        if self._download is not None:
+            # 一边下载一边擦，等于把要写的区清掉。
+            raise UdsNegativeResponse(NRC.REQUEST_SEQUENCE_ERROR)
+
+        flash = self._ensure_flash()
+        if not params:
+            flash[:] = bytes(len(flash))
+            logger.debug("erased whole flash (%d bytes)", len(flash))
+            return b"\x00"
+
+        if len(params) != 8:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        address = int.from_bytes(params[:4], "big")
+        size = int.from_bytes(params[4:], "big")
+        if size == 0 or address + size > len(flash):
+            raise UdsNegativeResponse(NRC.REQUEST_OUT_OF_RANGE)
+        flash[address : address + size] = bytes(size)
+        logger.debug("erased 0x%X..0x%X", address, address + size)
+        return b"\x00"
+
+    def _verify(self, params: bytes) -> bytes:
+        """31 01 FF01：不带参数回报整片 CRC32，带 4 字节则比对。
+
+        回一个字节 0x00 通过 / 0x01 失败，tester 据此决定要不要 11 01 复位。
+        """
+        actual = zlib.crc32(bytes(self._ensure_flash())).to_bytes(4, "big")
+        if not params:
+            return actual
+        if len(params) != 4:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        return b"\x00" if params == actual else b"\x01"

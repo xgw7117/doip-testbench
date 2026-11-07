@@ -273,14 +273,14 @@ cases:
   - id: UDS-DTC-006
     title: Status mask 0x08 filters out pending DTCs
     request: "19 02 08"
-    expected: "59 02 08 C1 23 45 09 01 23 45 08"
+    expected: "59 02 FF C1 23 45 09 01 23 45 08"
     tags: [dtc, filter]
     severity: critical
 
   - id: UDS-DTC-007
     title: Status mask 0x00 matches no DTC
     request: "19 02 00"
-    expected: "59 02 00"
+    expected: "59 02 FF"
     tags: [dtc, filter]
     severity: normal
 
@@ -337,7 +337,7 @@ cases:
   # ---------------------------------------------------------------- generic
   - id: UDS-GEN-001
     title: Unsupported service yields 0x11
-    request: "31 01 02 03"
+    request: "85 02"
     expected_nrc: 0x11
     tags: [generic, negative]
     severity: critical

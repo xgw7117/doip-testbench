@@ -90,6 +90,11 @@ class EcuConfig:
     dids: dict[int, DidDefinition] = field(default_factory=dict)
     dtcs: list[DtcDefinition] = field(default_factory=list)
     dtc_status_availability_mask: int = 0xFF
+    #: 刷写区大小（字节）。0x34 的「地址 + 长度」不能越过它。
+    flash_size: int = 0x10000
+    #: 0x36 单块上限，含 SID 与 blockSequenceCounter 两字节。这就是 ISO 14229-1
+    #: 里 0x34 正响应回给 tester 的 maxNumberOfBlockLength。
+    max_block_length: int = 0x0102
 
     def __post_init__(self) -> None:
         if len(self.vin) != 17:

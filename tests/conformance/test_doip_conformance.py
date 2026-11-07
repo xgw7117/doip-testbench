@@ -329,3 +329,13 @@ def test_fourth_socket_is_denied_when_three_are_active() -> None:
         finally:
             for client in clients:
                 client.close()
+
+
+@pytest.mark.conformance
+@allure.feature("DoIP conformance")
+@allure.story("Alive check")
+def test_alive_check_on_unactivated_connection_closes_it(client: DoIPClient) -> None:
+    """未路由激活就发 0x0007，服务端应关闭连接，而不是回 0x0008 + 0x0000。"""
+    client.send_frame(DoIPFrame(PayloadType.ALIVE_CHECK_REQUEST))
+    with pytest.raises(DoIPConnectionClosed):
+        client.receive_frame()

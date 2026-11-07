@@ -7,6 +7,7 @@ just request bytes in and response bytes out.
 from __future__ import annotations
 
 import pytest
+import zlib
 
 from doipbench.config import SecurityConfig, default_config
 from doipbench.uds import NegativeResponseCode as NRC
@@ -165,7 +166,7 @@ def test_dtc_count_and_listing(server: UdsServer) -> None:
 
 def test_dtc_mask_filters_pending_only(server: UdsServer) -> None:
     listing = server.handle(b"\x19\x02\x04")
-    assert listing == b"\x59\x02\x04\xc1\x23\x87\x04"
+    assert listing == b"\x59\x02\xff\xc1\x23\x87\x04"
 
 
 def test_dtc_snapshot_contains_vin(server: UdsServer) -> None:
@@ -179,7 +180,8 @@ def test_dtc_unknown_record_is_out_of_range(server: UdsServer) -> None:
 
 
 def test_unsupported_service(server: UdsServer) -> None:
-    assert nrc(server.handle(b"\x31\x01\x02\x03")) == NRC.SERVICE_NOT_SUPPORTED
+    # 0x85 ControlDTCSetting 没实现。0x31 现在实现了，不能再拿它当"不支持"的例子。
+    assert nrc(server.handle(b"\x85\x02")) == NRC.SERVICE_NOT_SUPPORTED
 
 
 def test_suppress_positive_response(server: UdsServer) -> None:
@@ -316,3 +318,225 @@ def test_state_for_creates_only_one_state_under_concurrency(monkeypatch):
 
     assert len(created) == 1
     assert len({id(r) for r in results}) == 1
+
+
+def test_dtc_count_reports_availability_mask_not_request_mask(server: UdsServer) -> None:
+    """0x19 01 的第三字节是 ECU 支持哪些 status bit，不能回显请求里的 mask。"""
+    response = server.handle(b"\x19\x01\x08")
+    assert response[:2] == b"\x59\x01"
+    assert response[2] == server.config.dtc_status_availability_mask
+    assert response[2] == 0xFF
+    assert response[3] == 0x01
+
+
+def test_dtc_by_status_reports_availability_mask_not_request_mask(server: UdsServer) -> None:
+    """0x19 02 同上：首字节恒为 availability mask，与请求 mask 无关。"""
+    response = server.handle(b"\x19\x02\x00")
+    assert response[:3] == b"\x59\x02\xff"
+
+
+
+# ------------------------------------------------------------------ 0x34/36/37
+# 刷写只做「34 请求下载 → 36 传数据 → 37 退出」这一段：擦除、校验、复位没实现，
+# README 里写了这条边界。下面每条都锁一个具体的拒绝理由，不看总数看原因。
+
+FLASH_ADDRESS = 0x8000
+
+
+def _enter_programming(server: UdsServer) -> None:
+    """走完刷写的前置条件：编程会话 + 安全解锁。"""
+    server.handle(b"\x10\x02")
+    seed = server.handle(b"\x27\x01")[2:]
+    server.handle(b"\x27\x02" + compute_key(seed, server.config.security.secret))
+
+
+def _download_request(size: int, address: int = FLASH_ADDRESS) -> bytes:
+    """dataFormat=0x00，ALFID=0x44（4 字节地址 + 4 字节长度）。"""
+    return b"\x34\x00\x44" + address.to_bytes(4, "big") + size.to_bytes(4, "big")
+
+
+def test_flash_sequence_writes_image(server: UdsServer) -> None:
+    """完整三段跑完，写到 0x34 声明的位置，一个字节都不差。"""
+    _enter_programming(server)
+
+    response = server.handle(_download_request(10))
+    assert response == b"\x74\x20\x01\x02"  # maxNumberOfBlockLength = 258
+
+    assert server.handle(b"\x36\x01" + bytes(range(1, 7))) == b"\x76\x01"
+    assert server.handle(b"\x36\x02" + bytes(range(7, 11))) == b"\x76\x02"
+    assert server.handle(b"\x37") == b"\x77"
+
+    image = server.flash_image()
+    assert image[FLASH_ADDRESS : FLASH_ADDRESS + 10] == bytes(range(1, 11))
+
+
+def test_flash_requires_programming_session(server: UdsServer) -> None:
+    """扩展会话不能刷写：0x34 只在编程会话可用。"""
+    server.handle(b"\x10\x03")
+    assert nrc(server.handle(_download_request(10))) == NRC.SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION
+
+
+def test_flash_requires_security_unlock(server: UdsServer) -> None:
+    """进了编程会话但没解锁，仍然不许下载。"""
+    server.handle(b"\x10\x02")
+    assert nrc(server.handle(_download_request(10))) == NRC.SECURITY_ACCESS_DENIED
+
+
+def test_request_download_rejects_address_beyond_flash(server: UdsServer) -> None:
+    """地址 + 长度越过刷写区，回 0x31 而不是截断或写坏别的区域。"""
+    _enter_programming(server)
+    beyond = _download_request(0x100, address=server.config.flash_size - 0x10)
+    assert nrc(server.handle(beyond)) == NRC.REQUEST_OUT_OF_RANGE
+
+
+def test_request_download_rejects_compressed_format(server: UdsServer) -> None:
+    """dataFormatIdentifier 非 0 表示压缩/加密，本实现不支持，必须明拒。"""
+    _enter_programming(server)
+    request = b"\x34\x11" + _download_request(10)[2:]
+    assert nrc(server.handle(request)) == NRC.REQUEST_OUT_OF_RANGE
+
+
+def test_request_download_rejects_inconsistent_length_format(server: UdsServer) -> None:
+    """ALFID 声明 4+4 字节，实际只跟了 4 字节：长度对不上就 0x13。"""
+    _enter_programming(server)
+    request = b"\x34\x00\x44" + FLASH_ADDRESS.to_bytes(4, "big") + b"\x00\x00"
+    assert nrc(server.handle(request)) == NRC.INCORRECT_MESSAGE_LENGTH
+
+
+def test_transfer_data_rejects_wrong_sequence_counter(server: UdsServer) -> None:
+    """块计数器要从 0x01 开始。直接发 0x02 是乱序，回 0x73 让 tester 重发。"""
+    _enter_programming(server)
+    server.handle(_download_request(10))
+    assert nrc(server.handle(b"\x36\x02" + bytes(4))) == NRC.WRONG_BLOCK_SEQUENCE_COUNTER
+
+
+def test_transfer_data_rejects_block_over_declared_size(server: UdsServer) -> None:
+    """声明 4 字节却传 5 字节：不截断，回 0x71。"""
+    _enter_programming(server)
+    server.handle(_download_request(4))
+    assert nrc(server.handle(b"\x36\x01" + bytes(5))) == NRC.TRANSFER_DATA_SUSPENDED
+
+
+def test_transfer_exit_rejects_incomplete_payload(server: UdsServer) -> None:
+    """声明 10 字节只传了 4 字节就 0x37：不写进去，也不当成功。"""
+    _enter_programming(server)
+    server.handle(_download_request(10))
+    server.handle(b"\x36\x01" + bytes(4))
+
+    assert nrc(server.handle(b"\x37")) == NRC.REQUEST_SEQUENCE_ERROR
+    assert server.flash_image()[FLASH_ADDRESS : FLASH_ADDRESS + 10] == bytes(10)
+
+
+def test_second_request_download_is_sequence_error(server: UdsServer) -> None:
+    """上一个事务没 0x37 就再来一次 0x34：先退出或切会话。"""
+    _enter_programming(server)
+    server.handle(_download_request(10))
+    assert nrc(server.handle(_download_request(10))) == NRC.REQUEST_SEQUENCE_ERROR
+
+
+def test_session_change_aborts_download(server: UdsServer) -> None:
+    """切会话会中断刷写事务，之后发 0x36 必须回 0x24 而不是拼到旧地址上。"""
+    _enter_programming(server)
+    server.handle(_download_request(10))
+
+    _enter_programming(server)  # 10 02 重新进一次，事务应被丢弃
+    assert nrc(server.handle(b"\x36\x01" + bytes(4))) == NRC.REQUEST_SEQUENCE_ERROR
+
+
+# ------------------------------------------------------------- 0x31 / 0x11
+# 擦除和校验是让"刷写"成为一个完整序列的最后两块：34 之前先擦，37 之后先校验，
+# 校验通过才复位。下面每条仍然只锁一个拒绝理由。
+
+
+def test_erase_clears_flash(server: UdsServer) -> None:
+    """31 01 FF00 不带参数擦整片。先写 10 字节，擦完必须全是 0。"""
+    _enter_programming(server)
+    server.handle(_download_request(10))
+    server.handle(b"\x36\x01" + bytes(range(1, 11)))
+    assert server.handle(b"\x37") == b"\x77"
+    assert server.flash_image()[FLASH_ADDRESS] == 0x01
+
+    assert server.handle(b"\x31\x01\xff\x00") == b"\x71\x01\xff\x00\x00"
+    assert server.flash_image() == bytes(server.config.flash_size)
+
+
+def test_erase_requires_programming_session(server: UdsServer) -> None:
+    """扩展会话不能擦：擦除和写入一样，只在编程会话可用。"""
+    server.handle(b"\x10\x03")
+    assert nrc(server.handle(b"\x31\x01\xff\x00")) == NRC.SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION
+
+
+def test_routine_rejects_unknown_identifier(server: UdsServer) -> None:
+    """不认识的 RID 回 0x31，不能静默当成功。"""
+    _enter_programming(server)
+    assert nrc(server.handle(b"\x31\x01\x12\x34")) == NRC.REQUEST_OUT_OF_RANGE
+
+
+def test_routine_rejects_stop_subfunction(server: UdsServer) -> None:
+    """只做 startRoutine（01）。stop（02）回 0x12，别假装支持。"""
+    _enter_programming(server)
+    assert nrc(server.handle(b"\x31\x02\xff\x00")) == NRC.SUB_FUNCTION_NOT_SUPPORTED
+
+
+def test_erase_rejects_range_beyond_flash(server: UdsServer) -> None:
+    """带参数的擦除：地址 + 长度越过刷写区，回 0x31。"""
+    _enter_programming(server)
+    request = (
+        b"\x31\x01\xff\x00"
+        + (server.config.flash_size - 0x10).to_bytes(4, "big")
+        + (0x100).to_bytes(4, "big")
+    )
+    assert nrc(server.handle(request)) == NRC.REQUEST_OUT_OF_RANGE
+
+
+def test_verify_reports_crc_and_detects_mismatch(server: UdsServer) -> None:
+    """不带参数回报 CRC，带参数就比对：对回 0x00，错回 0x01。"""
+    _enter_programming(server)
+    server.handle(b"\x31\x01\xff\x00")
+    expected = zlib.crc32(server.flash_image()).to_bytes(4, "big")
+
+    assert server.handle(b"\x31\x01\xff\x01") == b"\x71\x01\xff\x01" + expected
+    assert server.handle(b"\x31\x01\xff\x01" + expected) == b"\x71\x01\xff\x01\x00"
+    assert server.handle(b"\x31\x01\xff\x01" + bytes(4)) == b"\x71\x01\xff\x01\x01"
+
+
+def test_ecu_reset_returns_to_default_session(server: UdsServer) -> None:
+    """11 01 之后会话回默认、安全锁上，和重新上电一个效果。"""
+    _enter_programming(server)
+    assert server.session is Session.PROGRAMMING
+    assert server.security_level == 1
+
+    assert server.handle(b"\x11\x01") == b"\x51\x01"
+    assert server.session is Session.DEFAULT
+    assert server.security_level == 0
+
+
+def test_ecu_reset_clears_lockout(server: UdsServer) -> None:
+    """复位把 0x27 的错误计数清零——这是真实 ECU 的已知弱点，如实实现并锁住。"""
+    server.handle(b"\x10\x03")
+    for _ in range(server.config.security.max_attempts):
+        server.handle(b"\x27\x01")
+        server.handle(b"\x27\x02\x00\x00\x00\x00")
+    assert nrc(server.handle(b"\x27\x01")) == NRC.REQUIRED_TIME_DELAY_NOT_EXPIRED
+
+    server.handle(b"\x11\x01")
+    server.handle(b"\x10\x03")
+    assert server.handle(b"\x27\x01")[0] == 0x67
+
+
+def test_full_flash_sequence_end_to_end(server: UdsServer) -> None:
+    """擦除 → 下载 → 两块数据 → 退出 → 校验 → 复位，一条链走完。"""
+    _enter_programming(server)
+
+    assert server.handle(b"\x31\x01\xff\x00") == b"\x71\x01\xff\x00\x00"
+    assert server.handle(_download_request(10)) == b"\x74\x20\x01\x02"
+    assert server.handle(b"\x36\x01" + bytes(range(1, 7))) == b"\x76\x01"
+    assert server.handle(b"\x36\x02" + bytes(range(7, 11))) == b"\x76\x02"
+    assert server.handle(b"\x37") == b"\x77"
+
+    checksum = zlib.crc32(server.flash_image()).to_bytes(4, "big")
+    assert server.handle(b"\x31\x01\xff\x01" + checksum) == b"\x71\x01\xff\x01\x00"
+    assert server.handle(b"\x11\x01") == b"\x51\x01"
+
+    assert server.flash_image()[FLASH_ADDRESS : FLASH_ADDRESS + 10] == bytes(range(1, 11))
+    assert server.session is Session.DEFAULT

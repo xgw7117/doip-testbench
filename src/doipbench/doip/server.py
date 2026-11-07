@@ -34,13 +34,57 @@ from .constants import (
     PowerMode,
     RoutingActivationResponseCode,
 )
-from .frame import DoIPFrame, DoIPFrameParser, ProtocolError
+from .frame import (
+    DoIPFrame,
+    DoIPFrameParser,
+    IncorrectPatternFormat,
+    MessageTooLarge,
+    ProtocolError,
+    decode_frame,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Announcement payload is fixed by the standard: VIN(17) + LA(2) + EID(6) +
 #: GID(6) + further action(1).
 _ANNOUNCEMENT_FORMAT = ">17sH6s6sB"
+
+#: Payload types ISO 13400-2 puts on UDP 13400.
+#:
+#: These are the ones a tester sends *before* it knows the ECU's IP address, so
+#: they have to be reachable by broadcast. Everything else - routing activation,
+#: diagnostic messages, alive check - belongs to one TCP connection.
+UDP_PAYLOAD_TYPES = frozenset(
+    {
+        PayloadType.VEHICLE_IDENTIFICATION_REQUEST,
+        PayloadType.VEHICLE_IDENTIFICATION_REQUEST_EID,
+        PayloadType.VEHICLE_IDENTIFICATION_REQUEST_VIN,
+        PayloadType.ENTITY_STATUS_REQUEST,
+        PayloadType.POWER_MODE_INFORMATION_REQUEST,
+    }
+)
+
+
+def announcement_payload(config: EcuConfig) -> bytes:
+    """Build the 0x0004 payload (also used as the 0x0001-0x0003 answer)."""
+    return (
+        config.vin.encode("ascii")
+        + config.logical_address.to_bytes(2, "big")
+        + config.eid
+        + config.gid
+        + bytes([0x10])  # further action: routing activation required
+    )
+
+
+def entity_status_payload(server: DoIPServer) -> bytes:
+    """Build the 0x4002 payload: node type, socket counts, max data size."""
+    return bytes(
+        [
+            NodeType.NODE,
+            server.config.max_concurrent_sockets,
+            min(server.open_sockets(), 0xFF),
+        ]
+    ) + server.config.max_data_size.to_bytes(4, "big")
 
 
 @dataclass
@@ -60,13 +104,12 @@ class _Connection:
     routing: RoutingState = field(default_factory=RoutingState)
     uds_map: dict[int, UdsServer] = field(init=False)
     parser: DoIPFrameParser = field(init=False)
-
     _send_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
         config = self.server.config
         addresses = config.routing_table or {config.logical_address: "ecu"}
-        self.uds_map = {
+        self.uds_map: dict[int, UdsServer] = {
             address: UdsServer(config, self.server.state_for(address)) for address in addresses
         }
         self.parser = DoIPFrameParser(max_payload_size=self.server.max_payload_size)
@@ -146,13 +189,7 @@ class _Connection:
             if frame.payload.decode("ascii", errors="replace") != config.vin:
                 return
 
-        payload = (
-            config.vin.encode("ascii")
-            + config.logical_address.to_bytes(2, "big")
-            + config.eid
-            + config.gid
-            + bytes([0x10])  # further action: routing activation required
-        )
+        payload = announcement_payload(config)
         self._send(PayloadType.VEHICLE_ANNOUNCEMENT, payload)
 
     # ---------------------------------------------------------------- 0x0005
@@ -206,6 +243,10 @@ class _Connection:
 
     # ---------------------------------------------------------------- 0x0007
     def _alive_check(self, frame: DoIPFrame) -> None:
+        if not self.routing.activated:
+            logger.warning("alive check on unactivated connection from %s:%d, closing", *self.peer)
+            self._close()
+            return
         if frame.payload:
             self._send_generic_nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH)
             return
@@ -216,14 +257,7 @@ class _Connection:
         if frame.payload:
             self._send_generic_nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH)
             return
-        payload = bytes(
-            [
-                NodeType.NODE,
-                self.server.config.max_concurrent_sockets,
-                min(self.server.open_sockets(), 0xFF),
-            ]
-        ) + self.server.config.max_data_size.to_bytes(4, "big")
-        self._send(PayloadType.ENTITY_STATUS_RESPONSE, payload)
+        self._send(PayloadType.ENTITY_STATUS_RESPONSE, entity_status_payload(self.server))
 
     # ---------------------------------------------------------------- 0x4003
     def _power_mode(self, frame: DoIPFrame) -> None:
@@ -253,7 +287,6 @@ class _Connection:
         if uds is None:
             self._send_diagnostic_nack(source, target, DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS)
             return
-
         if len(uds_request) > self.server.config.max_data_size:
             self._send_diagnostic_nack(
                 source, target, DiagnosticNackCode.DIAGNOSTIC_MESSAGE_TOO_LARGE
@@ -272,7 +305,6 @@ class _Connection:
             + self.routing.client_address.to_bytes(2, "big")
             + uds_response
         )
-
         self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
 
     # -------------------------------------------------------------- tx helpers
@@ -288,6 +320,125 @@ class _Connection:
     def _send_diagnostic_nack(self, source: int, target: int, code: int) -> None:
         payload = source.to_bytes(2, "big") + target.to_bytes(2, "big") + bytes([code])
         self._send(PayloadType.DIAGNOSTIC_MESSAGE_NACK, payload)
+
+
+class _UdpEndpoint:
+    """The UDP 13400 half of the entity (ISO 13400-2 §7.2).
+
+    Vehicle identification has to work while the tester still does not know the
+    ECU's IP address, so those requests arrive by broadcast on UDP. Anything
+    that belongs to a connection - routing activation, diagnostic messages,
+    alive check - must stay on TCP, and a tester that sends them here gets a
+    generic NACK instead of an answer.
+
+    There is no per-datagram state: UDP is connectionless, so every datagram is
+    handled on its own and nothing is remembered between them.
+    """
+
+    def __init__(self, server: DoIPServer) -> None:
+        self.server = server
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((server.host, server.port))
+        self.sock.settimeout(0.2)
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="doip-udp", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        with contextlib.suppress(OSError):
+            self.sock.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def _run(self) -> None:
+        while not self.server.stopping:
+            try:
+                data, peer = self.sock.recvfrom(65535)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            with contextlib.suppress(OSError):
+                self._handle(data, peer)
+
+    # ------------------------------------------------------------------ rx
+    def _handle(self, data: bytes, peer: tuple[str, int]) -> None:
+        try:
+            frame = decode_frame(data, max_payload_size=self.server.max_payload_size)
+        except MessageTooLarge as exc:
+            self._nack(exc.payload_type, GenericNackCode.MESSAGE_TOO_LARGE, peer)
+            return
+        except IncorrectPatternFormat as exc:
+            self._nack(exc.payload_type, GenericNackCode.INCORRECT_PATTERN_FORMAT, peer)
+            return
+        except ProtocolError:
+            # Truncated datagram: there is no payload type to quote back, so a
+            # NACK would be a guess. Drop it and let the tester time out.
+            return
+
+        if frame.payload_type not in UDP_PAYLOAD_TYPES:
+            logger.warning(
+                "payload type 0x%04X is TCP-only, NACK to %s:%d",
+                frame.payload_type,
+                *peer,
+            )
+            self._nack(frame.payload_type, GenericNackCode.UNKNOWN_PAYLOAD_TYPE, peer)
+            return
+
+        udp_handlers: dict[int, Callable[[DoIPFrame, tuple[str, int]], None]] = {
+            PayloadType.ENTITY_STATUS_REQUEST: self._entity_status,
+            PayloadType.POWER_MODE_INFORMATION_REQUEST: self._power_mode,
+        }
+        handler = udp_handlers.get(frame.payload_type)
+        if handler is None:
+            self._vehicle_identification(frame, peer)
+            return
+        handler(frame, peer)
+
+    def _vehicle_identification(self, frame: DoIPFrame, peer: tuple[str, int]) -> None:
+        config = self.server.config
+        if frame.payload_type == PayloadType.VEHICLE_IDENTIFICATION_REQUEST:
+            if frame.payload:
+                self._nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH, peer)
+                return
+        elif frame.payload_type == PayloadType.VEHICLE_IDENTIFICATION_REQUEST_EID:
+            if len(frame.payload) != 6:
+                self._nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH, peer)
+                return
+            if frame.payload != config.eid:
+                return  # addressed to another entity: stay silent
+        else:
+            if len(frame.payload) != 17:
+                self._nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH, peer)
+                return
+            if frame.payload.decode("ascii", errors="replace") != config.vin:
+                return
+
+        self._send(PayloadType.VEHICLE_ANNOUNCEMENT, announcement_payload(config), peer)
+
+    def _entity_status(self, frame: DoIPFrame, peer: tuple[str, int]) -> None:
+        if frame.payload:
+            self._nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH, peer)
+            return
+        self._send(PayloadType.ENTITY_STATUS_RESPONSE, entity_status_payload(self.server), peer)
+
+    def _power_mode(self, frame: DoIPFrame, peer: tuple[str, int]) -> None:
+        if frame.payload:
+            self._nack(frame.payload_type, GenericNackCode.INVALID_PAYLOAD_LENGTH, peer)
+            return
+        self._send(PayloadType.POWER_MODE_INFORMATION_RESPONSE, bytes([PowerMode.READY]), peer)
+
+    # ------------------------------------------------------------------ tx
+    def _send(self, payload_type: int, payload: bytes, peer: tuple[str, int]) -> None:
+        self.sock.sendto(DoIPFrame(payload_type, payload).encode(), peer)
+
+    def _nack(self, payload_type: int | None, code: int, peer: tuple[str, int]) -> None:
+        quoted = (payload_type or 0).to_bytes(2, "big")
+        self._send(PayloadType.GENERIC_NEGATIVE_ACK, quoted + bytes([code]), peer)
 
 
 class DoIPServer:
@@ -308,6 +459,7 @@ class DoIPServer:
         self._lock = threading.Lock()
         self._connections: dict[socket.socket, _Connection] = {}
         self._thread: threading.Thread | None = None
+        self._udp: _UdpEndpoint | None = None
 
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -324,11 +476,16 @@ class DoIPServer:
                 target=self._accept_loop, name="doip-accept", daemon=True
             )
             self._thread.start()
+            self._udp = _UdpEndpoint(self)
+            self._udp.start()
         return self
 
     def stop(self) -> None:
         """Close the listener and every client socket."""
         self._stop.set()
+        if self._udp is not None:
+            self._udp.stop()
+            self._udp = None
         with self._lock:
             connections = list(self._connections.values())
         for connection in connections:
@@ -364,7 +521,12 @@ class DoIPServer:
             return len(self._connections)
 
     def state_for(self, logical_address: int) -> EcuState:
-        """Return the state of one ECU, creating it on first use."""
+        """Return the state object of one ECU, creating it on first use.
+
+        ``_states`` 会被多个连接线程同时读写，``dict`` 的"先查再写"不是原子操作：
+        两个线程同时进来会各建一个 ``EcuState``，后写的覆盖先写的，先拿到的那个
+        实例从此成了孤儿——对它做的 DID 写入、DTC 清除全部丢失。
+        """
         with self._lock:
             state = self._states.get(logical_address)
             if state is None:
@@ -388,13 +550,20 @@ class DoIPServer:
                 continue
             except OSError:
                 break
+            client.settimeout(0.2)
+            # 先查硬上限，再起线程：否则空连接（连上不动、不激活）可以无限堆积，
+            # 每个连接一个线程 + 一个句柄，几百个就足够把进程拖死。
             with self._lock:
                 over_limit = len(self._connections) >= self.config.max_open_sockets
             if over_limit:
+                logger.warning(
+                    "connection limit %d reached, dropping %s:%d",
+                    self.config.max_open_sockets,
+                    *peer,
+                )
                 with contextlib.suppress(OSError):
                     client.close()
                 continue
-            client.settimeout(0.2)
             connection = _Connection(self, client, peer)
             with self._lock:
                 self._connections[client] = connection
