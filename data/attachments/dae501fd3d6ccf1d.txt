@@ -1,0 +1,1 @@
+WARNING  doipbench.doip.server:server.py:150 protocol error from 127.0.0.1:57240: unsupported DoIP protocol version 0x01

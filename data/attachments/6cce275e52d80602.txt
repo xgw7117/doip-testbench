@@ -1,0 +1,1 @@
+WARNING  doipbench.doip.server:server.py:384 payload type 0x0005 is TCP-only, NACK to 127.0.0.1:42575
