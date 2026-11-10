@@ -19,6 +19,7 @@ import contextlib
 import logging
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -105,6 +106,8 @@ class _Connection:
     uds_map: dict[int, UdsServer] = field(init=False)
     parser: DoIPFrameParser = field(init=False)
     _send_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    #: 最后一次收到字节的时刻。用 ``monotonic`` 是因为墙钟跳变会让空闲判定失效。
+    last_activity: float = field(default_factory=time.monotonic)
 
     def __post_init__(self) -> None:
         config = self.server.config
@@ -119,6 +122,13 @@ class _Connection:
         logger.info("DoIP connection from %s:%d", *self.peer)
         try:
             while not self.server.stopping:
+                if self._idle_expired():
+                    logger.info(
+                        "closing idle connection from %s:%d (%.1fs)",
+                        *self.peer,
+                        self._idle_seconds(),
+                    )
+                    break
                 try:
                     chunk = self.sock.recv(4096)
                 except TimeoutError:
@@ -127,6 +137,7 @@ class _Connection:
                     break
                 if not chunk:
                     break
+                self.last_activity = time.monotonic()
                 try:
                     frames = self.parser.feed(chunk)
                 except ProtocolError as exc:
@@ -139,6 +150,22 @@ class _Connection:
         finally:
             self._close()
             logger.info("DoIP connection from %s:%d closed", *self.peer)
+
+    def _idle_seconds(self) -> float:
+        return time.monotonic() - self.last_activity
+
+    def _idle_expired(self) -> bool:
+        """True when nothing has arrived for longer than the inactivity limit.
+
+        ``recv`` timing out only says "no data in the last 200 ms"; it does not
+        mean the peer is gone.  A tester that was unplugged or lost power sends
+        neither FIN nor RST, so the kernel keeps retransmitting for ~15 minutes
+        before ``recv`` finally errors out.  Until then the connection keeps
+        occupying a ``max_concurrent_sockets`` slot and every new tester is
+        answered with 0x01 (all sockets registered).
+        """
+        limit = self.server.config.inactivity_timeout
+        return limit is not None and self._idle_seconds() >= limit
 
     def _close(self) -> None:
         with self.server._lock:  # noqa: SLF001 - tight coupling is intentional
@@ -310,8 +337,15 @@ class _Connection:
     # -------------------------------------------------------------- tx helpers
     def _send(self, payload_type: int, payload: bytes = b"") -> None:
         frame = DoIPFrame(payload_type, payload)
-        with self._send_lock, contextlib.suppress(OSError):
-            self.sock.sendall(frame.encode())
+        with self._send_lock:
+            try:
+                self.sock.sendall(frame.encode())
+            except OSError as exc:
+                # 对端已经 RST / 半关闭时 sendall 会抛 BrokenPipe/ConnectionReset。
+                # 这是连接层面的正常事件而不是程序错误：兜住它，让下一轮 recv
+                # 返回 0 走统一的清理路径。但必须留日志——静默失败在 tester 侧
+                # 只表现为"超时"，排查时会一路往协议层查，最后发现是 socket 断了。
+                logger.debug("send failed on %s:%d: %s", *self.peer, exc)
 
     def _send_generic_nack(self, original_payload_type: int, code: int) -> None:
         payload = original_payload_type.to_bytes(2, "big") + bytes([code])

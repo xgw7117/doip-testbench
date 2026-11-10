@@ -126,8 +126,8 @@ def main() -> None:
     )
 
     tiles = [
-        (9.5, "DoIP", "ISO 13400-2\n帧编解码 / 路由激活\n流式分帧"),
-        (29.5, "UDS", "ISO 14229-1\n0x10 0x27 0x22 0x2E 0x19\nNRC 异常矩阵"),
+        (9.5, "DoIP", "ISO 13400-2\nTCP 激活 / 诊断\nUDP 发现 / 分帧"),
+        (29.5, "UDS", "ISO 14229-1\n11 服务 / 刷写 34·36·37\n13 类 NRC"),
         (49.5, "SOME/IP", "AUTOSAR\n头 + SD 服务发现\nOffer / Find"),
         (69.5, "gPTP · VLAN", "IEEE 802.1AS / 802.1Q\n时钟同步 / 优先级"),
     ]
@@ -143,7 +143,7 @@ def main() -> None:
         ax,
         9,
         13.6,
-        "TCP :13400 诊断  ·  UDP 车辆发现  ·  多线程连接 / 并发 socket 限制",
+        "TCP :13400 诊断  ·  UDP 车辆发现  ·  多线程连接 / socket 上限与空闲回收",
         size=9.0,
         color=MUTED,
     )
@@ -157,26 +157,25 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------ CI
-    box(ax, 92, 6.5, 22, 53, facecolor=FILL_CI)
-    label(ax, 95, 55.4, "CI / CD", size=11, weight="bold", color="#3B6B4A")
+    box(ax, 92, 6.5, 22, 40, facecolor=FILL_CI)
+    label(ax, 95, 42.8, "CI / CD", size=11, weight="bold", color="#3B6B4A")
     ci_lines = [
         "ruff · mypy",
         "pytest 3.10 / 3.11 / 3.12",
-        "覆盖率 88%",
         "Allure 报告",
         "GitHub Pages 发布",
     ]
-    y = 49.0
+    y = 36.0
     for line in ci_lines:
         label(ax, 95, y, "· " + line, size=8.6, color=MUTED)
-        y -= 5.4
+        y -= 6.0
 
     # --------------------------------------------------------------- arrows
     arrow(ax, (47, 47.0), (47, 44.2))
     arrow(ax, (47, 25.4), (47, 21.7))
     arrow(ax, (88.2, 40), (91.8, 40))
 
-    label(ax, 6, 2.4, "155 条自动化用例 · Python 3.10+ · MIT License", size=8.5, color="#8A959E")
+    label(ax, 6, 2.4, "210 条自动化用例 · Python 3.10+ · MIT License", size=8.5, color="#8A959E")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT, bbox_inches="tight", facecolor=PAPER)

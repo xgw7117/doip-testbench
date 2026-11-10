@@ -339,3 +339,58 @@ def test_alive_check_on_unactivated_connection_closes_it(client: DoIPClient) -> 
     client.send_frame(DoIPFrame(PayloadType.ALIVE_CHECK_REQUEST))
     with pytest.raises(DoIPConnectionClosed):
         client.receive_frame()
+
+
+@pytest.mark.conformance
+@allure.feature("DoIP conformance")
+@allure.story("Connection lifecycle")
+def test_idle_connection_is_reclaimed_after_inactivity_timeout() -> None:
+    """空闲连接要被回收，否则会永久占着 ``max_concurrent_sockets`` 名额。
+
+    拔网线、ECU 掉电的对端不会发 FIN 也不会发 RST，服务端只能靠空闲计时发现。
+    这里把阈值压到 0.5s、并发上限压到 1，直接观察第二个 tester 从「被拒」到
+    「能激活」——这就是现场连不上的那个症状。
+    """
+    config = default_config(max_concurrent_sockets=1, inactivity_timeout=0.5)
+    with DoIPServer(config) as server:
+        idle = DoIPClient(port=server.port, timeout=2.0).connect()
+        second = DoIPClient(port=server.port, timeout=2.0).connect()
+        try:
+            assert idle.routing_activation().accepted
+
+            denied = second.routing_activation()
+            assert (
+                denied.response_code == RoutingActivationResponseCode.DENIED_ALL_SOCKETS_REGISTERED
+            )
+
+            # idle 从此一个字节都不发，等价于拔线：没有 FIN/RST 可等。
+            # second 必须保持有动作，否则它自己也会被判空闲——这条用例只想
+            # 验证「idle 松开名额」这一件事，两个连接都被关就测不出因果了。
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                second.send_frame(DoIPFrame(PayloadType.VEHICLE_IDENTIFICATION_REQUEST))
+                second.receive_frame(timeout=1.0)
+                time.sleep(0.25)
+
+            assert second.routing_activation().accepted
+        finally:
+            idle.close()
+            second.close()
+
+
+@pytest.mark.conformance
+@allure.feature("DoIP conformance")
+@allure.story("Connection lifecycle")
+def test_active_connection_survives_inactivity_timeout() -> None:
+    """空闲判定看最后一次收发，不是连接建立时间。
+
+    没有这条，把超时实现成「连接活了 N 秒就关」也能过上面的用例，却会掐掉
+    正在跑长流程的 tester（刷写时两次 0x36 之间本来就可能有间隔）。
+    """
+    config = default_config(inactivity_timeout=0.5)
+    with DoIPServer(config) as server, DoIPClient(port=server.port, timeout=2.0) as client:
+        assert client.routing_activation().accepted
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline:
+            assert client.alive_check() == client.client_address
+            time.sleep(0.2)

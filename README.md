@@ -2,11 +2,13 @@
 
 一个用 Python 写的车载诊断练习项目：虚拟 ECU + 一套 pytest 测试用例。
 
-虚拟 ECU 同时监听 UDP 和 TCP 13400：车辆识别、实体状态、电源模式走 UDP（tester 还不知道 ECU 的 IP，只能靠广播发现），路由激活、诊断消息、Alive Check 走 TCP。DoIP 侧实现 0x0001–0x0004、0x0005 / 0x0006、0x0007 / 0x0008、0x4001–0x4004、0x8001 / 0x8003；UDS 侧实现 0x10 / 0x27 / 0x22 / 0x2E / 0x19 / 0x3E / 0x11 / 0x31 / 0x34 / 0x36 / 0x37 十一个服务。配置里填了路由表之后，它就是一个网关：按目标逻辑地址把请求转发给挂在下挂的多个 ECU，未知地址回 0x8003。测试用例不需要 CANoe 或真实硬件，clone 下来装个依赖就能跑。
+虚拟 ECU 同时监听 UDP 和 TCP 13400：车辆识别、实体状态、电源模式走 UDP（tester 还不知道 ECU 的 IP，只能靠广播发现），路由激活、诊断消息、Alive Check 走 TCP。DoIP 侧实现 0x0001–0x0004、0x0005 / 0x0006、0x0007 / 0x0008、0x4001–0x4004、0x8001 / 0x8003；UDS 侧实现 0x10 / 0x27 / 0x22 / 0x2E / 0x19 / 0x3E / 0x11 / 0x31 / 0x34 / 0x36 / 0x37 十一个服务。配置里填了路由表之后，它就是一个网关：按目标逻辑地址把请求转发给下挂的多个 ECU，未知地址回 0x8003。测试用例不需要 CANoe 或真实硬件，clone 下来装个依赖就能跑。
 
 [![CI](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml/badge.svg)](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+![架构](docs/images/architecture.png)
 
 ## 实现范围
 
@@ -53,12 +55,12 @@ with DoIPServer(config, port=13400) as server:
 
 ## 测试
 
-一共 208 条，跑完 `pytest` 的最后一行就是这个数：
+一共 210 条，跑完 `pytest` 的最后一行就是这个数：
 
 | 层 | 条数 | 测什么 | 位置 |
 | --- | --- | --- | --- |
 | 单元 | 114 | 编解码、状态机、YAML 加载器，不碰网络 | `tests/unit/` |
-| 协议一致性 | 80 | 41 条 UDS 服务用例（YAML 数据驱动）+ 27 条 TCP 报文用例 + 10 条 UDP 报文用例 | `tests/conformance/` |
+| 协议一致性 | 82 | 41 条 UDS 服务用例（YAML 数据驱动）+ 30 条 TCP 报文用例 + 11 条 UDP 报文用例 | `tests/conformance/` |
 | 端到端 | 14 | 会话切换、安全锁定、两个 tester 同时连接、网关转发 | `tests/functional/` |
 
 GitHub Actions 上用 Python 3.10 / 3.11 / 3.12 各跑一遍。
@@ -102,7 +104,7 @@ tests/
 - 这个项目是为了学协议和测试写的，没有和真实 ECU 对接过。
 - 安全访问用的是简化的哈希算法，真实项目里这一步由 OEM 提供的 SeedKey DLL 完成。
 - UDP 只放发现类报文（识别 / 实体状态 / 电源模式）。诊断和 Alive Check 只能走 TCP，往 UDP 上发会收到 generic NACK——不是没实现，是标准不允许。
-- 网关是**进程内的逻辑地址路由**：按目标地址把请求分发到下挂的 UDS 实例，不是真的两跳网络。DoIP 的 entity 多跳（跨 entity 转发）没做，Alive Check 也只做了被动的 0x0007 → 0x0008 应答，没有主动探活回收空闲连接。
+- 网关是**进程内的逻辑地址路由**：按目标地址把请求分发到下挂的 UDS 实例，不是真的两跳网络。DoIP 的 entity 多跳（跨 entity 转发）没做；Alive Check 只做被动的 0x0007 → 0x0008 应答，不主动发探活包。空闲连接靠 `inactivity_timeout`（默认 300 s，`None` 关闭）回收——拔线/掉电的 tester 不会发 FIN 或 RST，否则只能等内核重传耗尽（约 15 分钟），期间一直占着 `max_concurrent_sockets` 的名额。
 
 ## 参考标准
 

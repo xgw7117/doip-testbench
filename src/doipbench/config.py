@@ -77,6 +77,10 @@ class EcuConfig:
     max_concurrent_sockets: int = 3
     #: 同时存在的 TCP 连接硬上限（含未激活），防止空连接耗尽线程与句柄。
     max_open_sockets: int = 16
+    #: 单条连接的空闲上限（秒）。超时后服务端主动关闭连接。``None`` 关闭该机制。
+    #: 没有它，拔网线/掉电的 tester 只能等内核重传耗尽（十几分钟）才被清理，
+    #: 期间一直占着 ``max_concurrent_sockets`` 的名额。
+    inactivity_timeout: float | None = 300.0
     max_data_size: int = 4096
     p2_ms: int = 50
     p2_star_ms: int = 5000
