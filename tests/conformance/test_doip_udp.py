@@ -13,12 +13,13 @@ generic NACK, and that distinction is what most of these tests are about.
 from __future__ import annotations
 
 import socket
+import threading
 
 import allure
 import pytest
 
 from doipbench.config import EcuConfig, default_config
-from doipbench.doip import DoIPFrame, DoIPServer
+from doipbench.doip import DoIPFrame, DoIPServer, identify_over_udp
 from doipbench.doip.constants import GenericNackCode, PayloadType
 from doipbench.doip.frame import decode_frame
 
@@ -177,3 +178,39 @@ def test_udp_endpoint_works_when_bound_to_wildcard_address() -> None:
         reply = exchange(srv.port, DoIPFrame(PayloadType.VEHICLE_IDENTIFICATION_REQUEST).encode())
         assert reply is not None, "wildcard-bound UDP endpoint did not answer"
         assert decode_frame(reply).payload_type == PayloadType.VEHICLE_ANNOUNCEMENT
+
+
+def test_identify_over_udp_needs_no_tcp_listener() -> None:
+    """识别要能在「只知道 IP 和端口、没有任何 TCP 监听」时完成。
+
+    tester 广播 0x0001 的时候还不知道实体地址，用 TCP 等于「先知道地址再问
+    地址」。这里只开一个 UDP socket 应答：任何退回 TCP 的实现都会
+    ConnectionRefused，用例立刻变红。
+    """
+    vin = b"LSVAA2BM5N2123456"
+    reply = DoIPFrame(
+        PayloadType.VEHICLE_ANNOUNCEMENT,
+        vin + (0x1001).to_bytes(2, "big") + b"\x00" * 6 + b"\x00" * 6 + b"\x00",
+    ).encode()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+
+    def responder() -> None:
+        try:
+            _request, peer = sock.recvfrom(2048)
+            sock.sendto(reply, peer)
+        finally:
+            sock.close()
+
+    worker = threading.Thread(target=responder, daemon=True)
+    worker.start()
+    try:
+        announcement = identify_over_udp("127.0.0.1", port, timeout=2.0)
+    finally:
+        worker.join(timeout=2.0)
+
+    assert announcement.vin == vin.decode()
+    assert announcement.logical_address == 0x1001
+    assert announcement.further_action == 0x00

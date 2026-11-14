@@ -11,6 +11,7 @@ from .client import (
     EntityStatus,
     RoutingActivationResult,
     VehicleAnnouncement,
+    identify_over_udp,
 )
 from .constants import (
     DiagnosticNackCode,
@@ -38,4 +39,5 @@ __all__ = [
     "RoutingActivationResponseCode",
     "RoutingActivationResult",
     "VehicleAnnouncement",
+    "identify_over_udp",
 ]

@@ -18,7 +18,7 @@ from collections.abc import Sequence
 
 from . import __version__
 from .config import EcuConfig, SecurityConfig, default_config
-from .doip import DoIPClient, DoIPServer, DoIPTimeout
+from .doip import DoIPClient, DoIPServer, DoIPTimeout, identify_over_udp
 from .doip.constants import PayloadType
 from .doip.frame import decode_frame
 from .testing.cases import Case, load_cases
@@ -151,15 +151,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_identify(args: argparse.Namespace) -> int:
-    with DoIPClient(
-        args.host, args.port, client_address=args.client_address, timeout=args.timeout
-    ) as client:
-        announcement = client.read_vehicle_identification()
-        print(f"VIN              {announcement.vin}")
-        print(f"logical address  0x{announcement.logical_address:04X}")
-        print(f"EID              {announcement.eid.hex(' ').upper()}")
-        print(f"GID              {announcement.gid.hex(' ').upper()}")
-        print(f"further action   0x{announcement.further_action:02X}")
+    if args.transport == "udp":
+        # 0x0001 的标准路径：tester 还不知道实体的 IP，只能发数据报。
+        # 用 TCP 连意味着"先知道地址再问地址"，在真台架上是死循环。
+        announcement = identify_over_udp(args.host, args.port, timeout=args.timeout)
+    else:
+        with DoIPClient(
+            args.host, args.port, client_address=args.client_address, timeout=args.timeout
+        ) as client:
+            announcement = client.read_vehicle_identification()
+
+    print(f"VIN              {announcement.vin}")
+    print(f"logical address  0x{announcement.logical_address:04X}")
+    print(f"EID              {announcement.eid.hex(' ').upper()}")
+    print(f"GID              {announcement.gid.hex(' ').upper()}")
+    print(f"further action   0x{announcement.further_action:02X}")
     return 0
 
 
@@ -221,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     identify = sub.add_parser("identify", help="read the vehicle announcement")
     add_ecu_options(identify)
+    identify.add_argument(
+        "--transport",
+        choices=("udp", "tcp"),
+        default="udp",
+        help="udp is the standard path (0x0001 must work before the address is known)",
+    )
     identify.set_defaults(func=cmd_identify)
 
     frame = sub.add_parser("frame", help="decode a raw DoIP frame")

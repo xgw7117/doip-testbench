@@ -175,7 +175,7 @@ def main() -> None:
     arrow(ax, (47, 25.4), (47, 21.7))
     arrow(ax, (88.2, 40), (91.8, 40))
 
-    label(ax, 6, 2.4, "210 条自动化用例 · Python 3.10+ · MIT License", size=8.5, color="#8A959E")
+    label(ax, 6, 2.4, "211 条自动化用例 · Python 3.10+ · MIT License", size=8.5, color="#8A959E")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT, bbox_inches="tight", facecolor=PAPER)

@@ -55,12 +55,12 @@ with DoIPServer(config, port=13400) as server:
 
 ## 测试
 
-一共 210 条，跑完 `pytest` 的最后一行就是这个数：
+一共 211 条，跑完 `pytest` 的最后一行就是这个数：
 
 | 层 | 条数 | 测什么 | 位置 |
 | --- | --- | --- | --- |
 | 单元 | 114 | 编解码、状态机、YAML 加载器，不碰网络 | `tests/unit/` |
-| 协议一致性 | 82 | 41 条 UDS 服务用例（YAML 数据驱动）+ 30 条 TCP 报文用例 + 11 条 UDP 报文用例 | `tests/conformance/` |
+| 协议一致性 | 83 | 41 条 UDS 服务用例（YAML 数据驱动）+ 30 条 TCP 报文用例 + 12 条 UDP 报文用例 | `tests/conformance/` |
 | 端到端 | 14 | 会话切换、安全锁定、两个 tester 同时连接、网关转发 | `tests/functional/` |
 
 GitHub Actions 上用 Python 3.10 / 3.11 / 3.12 各跑一遍。

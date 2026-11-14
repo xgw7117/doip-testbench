@@ -21,7 +21,7 @@ from .constants import (
     PayloadType,
     RoutingActivationResponseCode,
 )
-from .frame import DoIPFrame, DoIPFrameParser, ProtocolError
+from .frame import DoIPFrame, DoIPFrameParser, ProtocolError, decode_frame
 
 
 class DoIPClientError(Exception):
@@ -78,6 +78,59 @@ class VehicleAnnouncement:
     eid: bytes
     gid: bytes
     further_action: int
+
+
+def _decode_announcement(payload: bytes) -> VehicleAnnouncement:
+    """Decode the 32-byte body of a 0x0004 vehicle announcement."""
+    if len(payload) < 32:
+        raise DoIPClientError("vehicle announcement is too short")
+    vin, logical_address, eid, gid, further_action = struct.unpack(">17sH6s6sB", payload[:32])
+    return VehicleAnnouncement(
+        vin=vin.decode("ascii", errors="replace"),
+        logical_address=logical_address,
+        eid=eid,
+        gid=gid,
+        further_action=further_action,
+    )
+
+
+def identify_over_udp(
+    host: str = "127.0.0.1",
+    port: int = 13400,
+    timeout: float = 2.0,
+) -> VehicleAnnouncement:
+    """Ask "who are you" over UDP and decode the 0x0004 answer.
+
+    Vehicle identification has to work *before* the tester knows the entity's
+    address, so the request leaves as a datagram - a broadcast on a real bench,
+    a unicast when the address is already known.  TCP is unusable here: opening
+    the connection already requires the address the tester does not have yet,
+    which is why ``0x0001`` is one of the few payload types allowed on UDP.
+
+    Frame noise on the port (keep-alives, stray broadcasts from other testers)
+    is skipped until a 0x0004 shows up or the deadline passes.
+    """
+    request = DoIPFrame(PayloadType.VEHICLE_IDENTIFICATION_REQUEST).encode()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(timeout)
+        sock.sendto(request, (host, port))
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DoIPTimeout("no vehicle announcement before the deadline")
+            sock.settimeout(remaining)
+            try:
+                data, _peer = sock.recvfrom(2048)
+            except TimeoutError as exc:
+                raise DoIPTimeout("no vehicle announcement before the deadline") from exc
+            try:
+                frame = decode_frame(data, max_payload_size=4096)
+            except ProtocolError:
+                continue
+            if frame.payload_type == PayloadType.VEHICLE_ANNOUNCEMENT:
+                return _decode_announcement(frame.payload)
 
 
 class DoIPClient:
@@ -255,17 +308,7 @@ class DoIPClient:
     def wait_announcement(self, timeout: float | None = None) -> VehicleAnnouncement:
         """Decode the next 0x0004 without sending a request (EID/VIN variants)."""
         response = self._expect(PayloadType.VEHICLE_ANNOUNCEMENT, timeout)
-        payload = response.payload
-        if len(payload) < 32:
-            raise DoIPClientError("vehicle announcement is too short")
-        vin, logical_address, eid, gid, further_action = struct.unpack(">17sH6s6sB", payload[:32])
-        return VehicleAnnouncement(
-            vin=vin.decode("ascii", errors="replace"),
-            logical_address=logical_address,
-            eid=eid,
-            gid=gid,
-            further_action=further_action,
-        )
+        return _decode_announcement(response.payload)
 
     # ------------------------------------------------------------- diagnostics
     def send_diagnostic(self, uds_payload: bytes, target: int | None = None) -> None:
