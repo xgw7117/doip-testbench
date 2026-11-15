@@ -52,6 +52,11 @@ def test_gateway_routes_to_attached_ecu(gateway_client: DoIPClient) -> None:
         gateway_client.client_address.to_bytes(2, "big") + ECU_A.to_bytes(2, "big") + VIN_REQUEST
     )
     gateway_client.send_frame(DoIPFrame(PayloadType.DIAGNOSTIC_MESSAGE, payload))
+
+    ack = gateway_client.receive_frame()
+    assert ack.payload_type == PayloadType.DIAGNOSTIC_MESSAGE_ACK
+    assert int.from_bytes(ack.payload[0:2], "big") == GATEWAY
+
     frame = gateway_client.receive_frame()
 
     assert int.from_bytes(frame.payload[0:2], "big") == ECU_A

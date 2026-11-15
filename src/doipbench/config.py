@@ -82,6 +82,7 @@ class EcuConfig:
     #: 期间一直占着 ``max_concurrent_sockets`` 的名额。
     inactivity_timeout: float | None = 300.0
     max_data_size: int = 4096
+    ack_diagnostic_messages: bool = True
     p2_ms: int = 50
     p2_star_ms: int = 5000
     s3_ms: int = 5000

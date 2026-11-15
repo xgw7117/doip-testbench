@@ -28,6 +28,7 @@ from ..uds.server import UdsServer
 from ..uds.state import EcuState
 from .constants import (
     ActivationType,
+    DiagnosticAckCode,
     DiagnosticNackCode,
     GenericNackCode,
     NodeType,
@@ -322,6 +323,15 @@ class _Connection:
         if not uds_request:
             self._send_diagnostic_nack(source, target, DiagnosticNackCode.TRANSPORT_PROTOCOL_ERROR)
             return
+
+        if self.server.config.ack_diagnostic_messages:
+            # SA 是发出这一帧的实体，不是请求里的目标地址。
+            ack = (
+                self.server.config.entity_address.to_bytes(2, "big")
+                + source.to_bytes(2, "big")
+                + bytes([DiagnosticAckCode.ACCEPTED])
+            )
+            self._send(PayloadType.DIAGNOSTIC_MESSAGE_ACK, ack)
 
         uds_response = uds.handle(uds_request)
         if not uds_response:

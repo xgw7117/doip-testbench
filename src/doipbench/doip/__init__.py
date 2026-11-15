@@ -14,6 +14,7 @@ from .client import (
     identify_over_udp,
 )
 from .constants import (
+    DiagnosticAckCode,
     DiagnosticNackCode,
     GenericNackCode,
     PayloadType,
@@ -23,6 +24,7 @@ from .frame import DoIPFrame, DoIPFrameParser, ProtocolError
 from .server import DoIPServer
 
 __all__ = [
+    "DiagnosticAckCode",
     "DiagnosticNackCode",
     "DiagnosticRejected",
     "DoIPClient",

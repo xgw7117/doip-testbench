@@ -55,6 +55,12 @@ class RoutingActivationResponseCode(IntEnum):
     ACCEPTED_CONFIRMATION_REQUIRED = 0x11
 
 
+class DiagnosticAckCode(IntEnum):
+    """Acknowledgement code carried by payload type 0x8002."""
+
+    ACCEPTED = 0x00
+
+
 class DiagnosticNackCode(IntEnum):
     """NACK codes carried by payload type 0x8003."""
 
