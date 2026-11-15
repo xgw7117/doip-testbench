@@ -1,4 +1,4 @@
-.PHONY: help install test cov lint format type report clean
+.PHONY: check help install test cov lint format type report clean
 
 PYTHON ?= python3
 
@@ -36,3 +36,6 @@ report:
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov coverage.xml reports/allure-results
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+
+check:
+	$(PYTHON) tools/check.py
