@@ -36,10 +36,9 @@ def test_diagnostic_message_is_acknowledged_before_the_response(
 @allure.story("Diagnostic acknowledgement")
 def test_acknowledgement_can_be_disabled_for_internal_nodes() -> None:
     config = default_config(ack_diagnostic_messages=False)
-    with DoIPServer(config) as server:
-        with DoIPClient(port=server.port, timeout=2.0).connect() as client:
-            assert client.routing_activation().accepted
-            client.send_diagnostic(b"\x22\xf1\x90")
-            frame = client.receive_frame()
-            assert frame.payload_type == PayloadType.DIAGNOSTIC_MESSAGE
-            assert frame.payload[4:].startswith(b"\x62\xf1\x90")
+    with DoIPServer(config) as server, DoIPClient(port=server.port, timeout=2.0) as client:
+        assert client.routing_activation().accepted
+        client.send_diagnostic(b"\x22\xf1\x90")
+        frame = client.receive_frame()
+        assert frame.payload_type == PayloadType.DIAGNOSTIC_MESSAGE
+        assert frame.payload[4:].startswith(b"\x62\xf1\x90")

@@ -24,6 +24,7 @@ class SecurityConfig:
     delay_seconds: float = 5.0
     #: Demo secret.  A production ECU keeps this in HSMs, never in source code.
     secret: bytes = b"doip-testbench-demo"
+    key_version: int = 1
 
     def __post_init__(self) -> None:
         if self.seed_length not in (4, 8, 16):
@@ -114,13 +115,14 @@ class EcuConfig:
         return self.dids.get(did)
 
 
-def _default_dids(vin: str) -> dict[int, DidDefinition]:
+def _default_dids(vin: str, key_version: int = 1) -> dict[int, DidDefinition]:
     return {
         0xF190: DidDefinition(0xF190, "VIN", vin.encode("ascii"), writable=False),
         0xF187: DidDefinition(0xF187, "Spare part number", b"8R0 907 115 A"),
         0xF18C: DidDefinition(0xF18C, "ECU serial number", b"ECU-2026-0001"),
         0xF186: DidDefinition(0xF186, "Active diagnostic session", b"\x01"),
         0xF195: DidDefinition(0xF195, "Software version", b"SW 01.04.02"),
+        0xF1A0: DidDefinition(0xF1A0, "Security key version", bytes([key_version & 0xFF])),
         0x0100: DidDefinition(
             0x0100,
             "Config block A",
@@ -167,9 +169,10 @@ def _default_dtcs() -> list[DtcDefinition]:
 def default_config(**overrides: Any) -> EcuConfig:
     """Build the default ECU configuration, with optional field overrides."""
     vin = str(overrides.get("vin", DEFAULT_VIN))
+    security = overrides.get("security") or SecurityConfig()
     values: dict[str, Any] = {
         "vin": vin,
-        "dids": _default_dids(vin),
+        "dids": _default_dids(vin, security.key_version),
         "dtcs": _default_dtcs(),
     }
     values.update(overrides)
