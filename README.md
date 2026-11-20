@@ -4,6 +4,8 @@
 
 ![CI](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml/badge.svg) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
+在线报告：[Allure · 213 passed](https://xgw7117.github.io/doip-testbench/)
+
 ## 先看它能干什么
 
 ```
