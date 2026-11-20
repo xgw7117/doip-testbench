@@ -6,26 +6,7 @@
 
 ## 先看它能干什么
 
-```
-$ python tools/uds_shell.py
-virtual ECU listening on 127.0.0.1:13400
-routing activation accepted. type ? for help, q to quit.
-
-uds> 10 03
-  TX  0x8001  0E00 -> 1001  10 03
-  RX  0x8002  1001 -> 0E00  accepted
-  RX  0x8001  1001 -> 0E00  50 03 00 32 01 F4
-
-uds> flash /tmp/app.bin
-flash /tmp/app.bin  4096 bytes  ->  0x0000
-[1] 10 02 session   ok
-[2] 27 02 unlock    ok
-[3] 31 01 FF00      ok
-[4] 36 transfer     16/16 blocks  4096/4096 bytes
-[5] 37 exit         ok
-[6] 31 01 FF01      verify      ok
-programmed.
-```
+![alt text](flash-1.png)
 
 一条 `10 03` 走的是完整链路：封成 `0x8001` 发出去，ECU 先回 `0x8002` 确认，再回携带 UDS 应答的 `0x8001`。`flash` 一条命令跑完擦除、下载、传输、校验、复位。
 
