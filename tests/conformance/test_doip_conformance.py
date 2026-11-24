@@ -567,6 +567,47 @@ def test_functional_address_reaches_the_ecu() -> None:
 
 
 @pytest.mark.conformance
+@allure.feature("DoIP conformance")
+@allure.story("Functional addressing")
+def test_wwh_obd_functional_address_reaches_the_ecu() -> None:
+    """接受 activation type 0x01 的实体，也必须响应 0xE000。
+
+    0xE000 是 ISO 27145 WWH-OBD 的功能组地址，和 ActivationType.WWH_OBD 是
+    同一条链路上的两半。只认 0xE400 时，一个 WWH-OBD tester 能激活，却在第一
+    帧 10 03 上收到 0x8003——现象和"这台车不做 WWH-OBD"一模一样。
+    """
+    with DoIPServer(default_config()) as server:
+        sock = _raw_connect(server)
+        try:
+            _raw_send(
+                sock,
+                0x03,
+                PayloadType.ROUTING_ACTIVATION_REQUEST,
+                _routing_payload(0x0E00, 0x01),
+            )
+            _v, _t, activation = _raw_recv(sock)
+            assert activation[4] == 0x10, "WWH-OBD 激活本身应当被接受"
+
+            _raw_send(
+                sock,
+                0x03,
+                PayloadType.DIAGNOSTIC_MESSAGE,
+                b"\x0e\x00" + b"\xe0\x00" + b"\x10\x03",
+            )
+            while True:
+                _v, payload_type, body = _raw_recv(sock)
+                if payload_type == PayloadType.DIAGNOSTIC_MESSAGE_NACK:
+                    # 比等超时有用：失败信息直接给出被拒的码值。
+                    pytest.fail(f"0xE000 被拒: 0x8003 code=0x{body[4]:02X}")
+                if payload_type == PayloadType.DIAGNOSTIC_MESSAGE:
+                    break
+        finally:
+            sock.close()
+
+    assert body[4:6] == b"\x50\x03"
+
+
+@pytest.mark.conformance
 @allure.feature("UDS conformance")
 @allure.story("Session control")
 def test_security_access_survives_extended_to_programming() -> None:

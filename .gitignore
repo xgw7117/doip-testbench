@@ -27,3 +27,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# 一次性补丁文件，不进仓库（曾经把 fix3.patch.txt 提交过一次）
+*.patch.txt

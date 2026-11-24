@@ -100,12 +100,14 @@ class EcuConfig:
     #: Gateway mode: logical address -> ECU name.  Empty means direct connection
     #: (the ECU answers on ``logical_address`` only).
     routing_table: dict[int, str] = field(default_factory=dict)
-    #: 可以一次性寻址到多台 ECU 的逻辑地址。ISO 13400-2 Table 13 把
-    #: 0xE400–0xEFFF 整段划给「厂商定义的功能组地址」，具体用哪几个由 OEM 定，
-    #: 0xE400 是其中最通行的 OBD 功能地址，其余按需加进这个集合。
-    #: 注意 0xD000–0xDFFF 属于 SAE Truck & Bus 保留段，不是广播地址——这里
-    #: 曾经写过 0xDFFF，凭记忆抄的，直到有人拿 Table 13 对着看才发现。
-    functional_addresses: frozenset[int] = frozenset({0xE400})
+    #: 可以一次性寻址到多台 ECU 的逻辑地址。Table 13 里只有两段合法来源：
+    #: 0xE000 是 ISO 27145 WWH-OBD 的功能组地址，0xE400–0xEFFF 是厂商定义的
+    #: 功能组区间。0xE001–0xE3FF 虽然也画在功能组里，但标注为 ISO/SAE 保留，
+    #: 不开放。0xE400 是最通行的 OBD 功能地址；0xE000 与
+    #: ActivationType.WWH_OBD 是配套的两半，接受 0x01 激活却不认这个地址，
+    #: 会让 WWH-OBD tester 在第一帧 10 03 上就拿到 0x8003。
+    #: 这里曾经写过 0xDFFF（SAE Truck & Bus 保留段），凭记忆抄的。
+    functional_addresses: frozenset[int] = frozenset({0xE000, 0xE400})
     security: SecurityConfig = field(default_factory=SecurityConfig)
     dids: dict[int, DidDefinition] = field(default_factory=dict)
     dtcs: list[DtcDefinition] = field(default_factory=list)
@@ -123,12 +125,13 @@ class EcuConfig:
             raise ValueError("logical address must fit in 16 bits")
         if len(self.eid) != 6 or len(self.gid) != 6:
             raise ValueError("EID and GID must be 6 bytes")
-        invalid = sorted(a for a in self.functional_addresses if not 0xE400 <= a <= 0xEFFF)
-        if invalid:
-            raise ValueError(
-                "functional addresses must lie in 0xE400-0xEFFF "
-                f"(ISO 13400-2 Table 13); got {[hex(a) for a in invalid]}"
-            )
+        for address in sorted(self.functional_addresses):
+            if address != 0xE000 and not 0xE400 <= address <= 0xEFFF:
+                raise ValueError(
+                    "functional address must be 0xE000 (WWH-OBD, ISO 27145) or "
+                    "inside 0xE400-0xEFFF (ISO 13400-2 Table 13); "
+                    f"got {hex(address)}"
+                )
 
     def get_did(self, did: int) -> DidDefinition | None:
         """Return the DID definition or ``None`` when it is not supported."""
