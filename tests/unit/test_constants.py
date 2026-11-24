@@ -35,20 +35,20 @@ def test_payload_type_values() -> None:
 @pytest.mark.parametrize(
     ("code", "value"),
     [
-        (DiagnosticNackCode.INVALID_SOURCE_ADDRESS, 0x01),
-        (DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS, 0x02),
-        (DiagnosticNackCode.DIAGNOSTIC_MESSAGE_TOO_LARGE, 0x03),
-        (DiagnosticNackCode.OUT_OF_MEMORY, 0x04),
-        (DiagnosticNackCode.TARGET_UNREACHABLE, 0x05),
-        (DiagnosticNackCode.UNKNOWN_NETWORK, 0x06),
-        (DiagnosticNackCode.TRANSPORT_PROTOCOL_ERROR, 0x07),
+        (DiagnosticNackCode.INVALID_SOURCE_ADDRESS, 0x02),
+        (DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS, 0x03),
+        (DiagnosticNackCode.DIAGNOSTIC_MESSAGE_TOO_LARGE, 0x04),
+        (DiagnosticNackCode.OUT_OF_MEMORY, 0x05),
+        (DiagnosticNackCode.TARGET_UNREACHABLE, 0x06),
+        (DiagnosticNackCode.UNKNOWN_NETWORK, 0x07),
+        (DiagnosticNackCode.TRANSPORT_PROTOCOL_ERROR, 0x08),
     ],
 )
 def test_nack_code_matches_iso_13400_2(code: DiagnosticNackCode, value: int) -> None:
-    """0x8003 carries these seven codes, numbered from 0x01.
+    """0x8003 carries these seven codes, numbered from 0x02 (Table 26).
 
-    A previous revision started the table at 0x02, shifting every entry by
-    one; 159 tests stayed green because their assertions used the same enum.
+    Asserted against literals rather than against the enum: a table test that
+    compares the enum with itself can only prove the enum equals itself.
     """
     assert int(code) == value
 

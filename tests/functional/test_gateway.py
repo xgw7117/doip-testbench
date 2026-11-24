@@ -8,7 +8,7 @@ import pytest
 
 from doipbench.config import default_config
 from doipbench.doip import DiagnosticRejected, DoIPClient, DoIPFrame, DoIPServer
-from doipbench.doip.constants import DiagnosticNackCode, PayloadType
+from doipbench.doip.constants import PayloadType
 
 pytestmark = pytest.mark.functional
 
@@ -69,7 +69,7 @@ def test_gateway_rejects_unknown_target(gateway_client: DoIPClient) -> None:
     gateway_client.send_diagnostic(VIN_REQUEST, target=UNKNOWN)
     with pytest.raises(DiagnosticRejected) as excinfo:
         gateway_client.wait_diagnostic()
-    assert excinfo.value.code == DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS
+    assert excinfo.value.code == 0x03  # ISO Table 26: unknown target address
 
 
 def test_one_activation_covers_every_address(gateway_client: DoIPClient) -> None:

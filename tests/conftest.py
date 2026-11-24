@@ -98,7 +98,7 @@ def ecu_server(ecu_config: EcuConfig) -> Iterator[DoIPServer]:
 @pytest.fixture
 def client(ecu_server: DoIPServer) -> Iterator[DoIPClient]:
     """Connected but *not* routing-activated tester."""
-    ecu_server.reset_state()
+    ecu_server.reset_state(include_routing=True)
     instance = DoIPClient(port=ecu_server.port, timeout=2.0).connect()
     try:
         yield instance

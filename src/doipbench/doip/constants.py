@@ -66,13 +66,15 @@ class DiagnosticAckCode(IntEnum):
 class DiagnosticNackCode(IntEnum):
     """NACK codes carried by payload type 0x8003."""
 
-    INVALID_SOURCE_ADDRESS = 0x01
-    UNKNOWN_TARGET_ADDRESS = 0x02
-    DIAGNOSTIC_MESSAGE_TOO_LARGE = 0x03
-    OUT_OF_MEMORY = 0x04
-    TARGET_UNREACHABLE = 0x05
-    UNKNOWN_NETWORK = 0x06
-    TRANSPORT_PROTOCOL_ERROR = 0x07
+    # ISO 13400-2 Table 26。0x00/0x01 是保留值，这七个码从 0x02 起，
+    # 不是从 0x01 起——整组错一位会让对端把"目标地址未知"读成"源地址无效"。
+    INVALID_SOURCE_ADDRESS = 0x02
+    UNKNOWN_TARGET_ADDRESS = 0x03
+    DIAGNOSTIC_MESSAGE_TOO_LARGE = 0x04
+    OUT_OF_MEMORY = 0x05
+    TARGET_UNREACHABLE = 0x06
+    UNKNOWN_NETWORK = 0x07
+    TRANSPORT_PROTOCOL_ERROR = 0x08
 
 
 class PowerMode(IntEnum):

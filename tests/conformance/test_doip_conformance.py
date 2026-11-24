@@ -27,7 +27,6 @@ from doipbench.doip import (
 )
 from doipbench.doip.constants import (
     DiagnosticAckCode,
-    DiagnosticNackCode,
     GenericNackCode,
     PayloadType,
     RoutingActivationResponseCode,
@@ -184,7 +183,7 @@ def test_diagnostic_before_routing_activation_is_nacked(client: DoIPClient) -> N
     client.send_diagnostic(b"\x10\x03")
     with pytest.raises(DiagnosticRejected) as error:
         client.wait_diagnostic()
-    assert error.value.code == DiagnosticNackCode.INVALID_SOURCE_ADDRESS
+    assert error.value.code == 0x02  # ISO Table 26: invalid source address
 
 
 @pytest.mark.conformance
@@ -194,7 +193,7 @@ def test_diagnostic_to_unknown_target_is_nacked(routed_client: DoIPClient) -> No
     routed_client.send_diagnostic(b"\x10\x03", target=0x1234)
     with pytest.raises(DiagnosticRejected) as error:
         routed_client.wait_diagnostic()
-    assert error.value.code == DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS
+    assert error.value.code == 0x03  # ISO Table 26: unknown target address
 
 
 @pytest.mark.conformance
@@ -249,7 +248,7 @@ def test_truncated_diagnostic_message_is_nacked(client: DoIPClient) -> None:
     client.send_frame(DoIPFrame(PayloadType.DIAGNOSTIC_MESSAGE, b"\x0e\x00"))
     frame = client.receive_frame()
     assert frame.payload_type == PayloadType.DIAGNOSTIC_MESSAGE_NACK
-    assert frame.payload[4] == DiagnosticNackCode.TRANSPORT_PROTOCOL_ERROR
+    assert frame.payload[4] == 0x08  # ISO Table 26: transport protocol error
 
 
 @pytest.mark.conformance
@@ -424,16 +423,21 @@ def test_idle_connection_is_reclaimed_after_inactivity_timeout() -> None:
                 denied.response_code == RoutingActivationResponseCode.DENIED_ALL_SOCKETS_REGISTERED
             )
 
-            # idle 从此一个字节都不发，等价于拔线：没有 FIN/RST 可等。
-            # second 必须保持有动作，否则它自己也会被判空闲——这条用例只想
-            # 验证「idle 松开名额」这一件事，两个连接都被关就测不出因果了。
-            deadline = time.monotonic() + 1.2
-            while time.monotonic() < deadline:
-                second.send_frame(DoIPFrame(PayloadType.VEHICLE_IDENTIFICATION_REQUEST))
+            # ISO 13400-2 §9.4.2：响应码不是 0x10 时实体关闭 socket。被拒的
+            # tester 必须重连，不能在这条连接上继续发——那样既不合规，也会把
+            # "被拒关闭"和"空闲回收"混成同一种现象，测不出名额有没有松开。
+            with pytest.raises(DoIPConnectionClosed):
                 second.receive_frame(timeout=1.0)
-                time.sleep(0.25)
+            second.close()
 
-            assert second.routing_activation().accepted
+            # idle 从此一个字节都不发，等价于拔线：没有 FIN/RST 可等。
+            time.sleep(1.2)
+
+            retry = DoIPClient(port=server.port, timeout=2.0, client_address=0x0E01).connect()
+            try:
+                assert retry.routing_activation().accepted
+            finally:
+                retry.close()
         finally:
             idle.close()
             second.close()

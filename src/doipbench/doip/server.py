@@ -261,6 +261,11 @@ class _Connection:
             activation_type,
             code,
         )
+        if code != RoutingActivationResponseCode.ACCEPTED:
+            # ISO 13400-2 §9.4.2：响应码不是 0x10 时实体应关闭这条连接。
+            # 留着它，tester 的重试逻辑分不清"被拒"和"超时"，而且被拒的
+            # socket 还能继续发诊断——等于路由激活形同虚设。
+            self._closing = True
 
     def _evaluate_routing_activation(self, client_address: int, activation_type: int) -> int:
         config = self.server.config
@@ -373,10 +378,23 @@ class _Connection:
             )
             self._send(PayloadType.DIAGNOSTIC_MESSAGE_ACK, ack)
 
+        # 状态副作用必须全量，响应数量才需要克制。原来的 break 放在循环里，
+        # 功能寻址的 10 03 只让排在第一台 ECU 进了扩展会话，后面几台还在默认
+        # 会话——而 tester 收到 50 03 会认为"全网都切好了"，直到单播 27 01 收到
+        # 7F 7F 才发现不对，那时已经很难定位。
+        answered = False
         for address, uds in targets:
             uds_response = uds.handle(uds_request)
+            if uds_response and uds_response[0] == ServiceId.ECU_RESET + 0x40:
+                # 真 ECU 复位会断链。刷写工具的标准动作是"发 11 01 -> 等
+                # socket 关闭 -> 重连 -> 读版本确认"，不断链它只能等到超时。
+                self._closing = True
             if not uds_response:
                 continue  # positive response suppressed by the tester
+            if functional and answered:
+                # 多个 ECU 同时应答会在同一条连接上撞车，功能寻址只回第一份；
+                # 真实总线靠响应抑制位或不同 SA 区分，教学实现不做那一步。
+                continue
             # 功能寻址时 SA 是回应的那台 ECU，不是 0xE400；单播时两者相同。
             response = (
                 address.to_bytes(2, "big")
@@ -384,14 +402,7 @@ class _Connection:
                 + uds_response
             )
             self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
-            if uds_response[0] == ServiceId.ECU_RESET + 0x40:
-                # 真 ECU 复位会断链。刷写工具的标准动作是"发 11 01 -> 等
-                # socket 关闭 -> 重连 -> 读版本确认"，不断链它只能等到超时。
-                self._closing = True
-            if functional:
-                # 多个 ECU 同时应答会撞车，这里只回第一个；真实总线靠响应
-                # 抑制位或不同 SA 区分，教学实现不需要做到那一步。
-                break
+            answered = True
 
     # -------------------------------------------------------------- tx helpers
     def _send(self, payload_type: int, payload: bytes = b"") -> None:
@@ -644,19 +655,26 @@ class DoIPServer:
                 self._states[logical_address] = state
             return state
 
-    def reset_state(self) -> None:
-        """Restore DIDs, DTCs and routing activation to their factory defaults."""
+    def reset_state(self, *, include_routing: bool = False) -> None:
+        """Restore DIDs and DTCs to their factory defaults.
+
+        ``include_routing=True`` additionally clears the routing activation of
+        every live connection.  That is a harness convenience, not a bench
+        operation: on a running entity it silently drops the activation of a
+        connected tester, whose next diagnostic frame then returns 0x8003.
+        """
         with self._lock:
             states = list(self._states.values())
             connections = list(self._connections.values())
         for state in states:
             state.reset()
-        # 上一条用例的 socket 可能还没被服务端回收：客户端 close 到服务端读到
-        # EOF 之间有一个窗口，在那之前它的激活记录仍然有效。不在这里清掉，
-        # 下一条用例用同一个 SA 建连就会被 0x03 拒掉——这是测试之间的竞态，
-        # 不是协议行为，所以只清测试钩子触达的状态。
-        for connection in connections:
-            connection.routing = RoutingState()
+        if include_routing:
+            # 上一条用例的 socket 可能还没被服务端回收：客户端 close 到服务端
+            # 读到 EOF 之间有一个窗口，在那之前它的激活记录仍然有效。测试
+            # fixture 用这个开关清残留，否则下一条用例用同一个 SA 建连会被
+            # 0x03 拒掉——这是用例之间的竞态，不是协议行为。
+            for connection in connections:
+                connection.routing = RoutingState()
 
     # ------------------------------------------------------------- internals
     def _accept_loop(self) -> None:
