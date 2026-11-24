@@ -32,7 +32,7 @@ dev = [
     "mypy>=1.8",
     "udsoncan>=1.24",
     # 互操作检查用第三方 DoIP 客户端，没有它 tools/interop_check.py 跑不起来
-    "python-doipclient>=1.0",
+    "doipclient>=1.0",
 ]
 
 [project.scripts]
