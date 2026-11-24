@@ -1,0 +1,6 @@
+WARNING  doipbench.doip.server:server.py:694 connection limit 4 reached, dropping 127.0.0.1:35516
+WARNING  doipbench.doip.server:server.py:694 connection limit 4 reached, dropping 127.0.0.1:35526
+WARNING  doipbench.doip.server:server.py:694 connection limit 4 reached, dropping 127.0.0.1:35532
+WARNING  doipbench.doip.server:server.py:694 connection limit 4 reached, dropping 127.0.0.1:35544
+WARNING  doipbench.doip.server:server.py:694 connection limit 4 reached, dropping 127.0.0.1:35556
+WARNING  doipbench.doip.server:server.py:694 connection limit 4 reached, dropping 127.0.0.1:35558

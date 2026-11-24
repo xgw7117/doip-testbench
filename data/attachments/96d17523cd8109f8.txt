@@ -1,0 +1,1 @@
+WARNING  UdsClient:client.py:182 [NegativeResponseException] : DiagnosticSessionControl service execution returned a negative response SubFunctionNotSupported (0x12)
