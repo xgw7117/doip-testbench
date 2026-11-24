@@ -119,7 +119,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         for case in cases:
             # Every case gets a clean connection, exactly like the pytest suite.
             if server is not None:
-                server.reset_state()
+                server.reset_state(include_routing=True)
             client = DoIPClient(host=host, port=port, timeout=args.timeout).connect()
             try:
                 activation = client.routing_activation()

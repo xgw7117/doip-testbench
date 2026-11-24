@@ -77,3 +77,23 @@ def test_one_activation_covers_every_address(gateway_client: DoIPClient) -> None
     for target in (GATEWAY, ECU_A):
         gateway_client.send_diagnostic(VIN_REQUEST, target=target)
         assert gateway_client.wait_diagnostic().startswith(VIN_PREFIX)
+
+
+def test_functional_request_switches_every_ecu(gateway_client: DoIPClient) -> None:
+    """A functional ``10 03`` must move *every* ECU into the extended session.
+
+    Only one response comes back -- two ECUs answering into the same socket
+    would collide -- so the state change can only be observed by unicasting to
+    each address afterwards.  This is exactly what a ``break`` placed inside
+    the dispatch loop breaks: the first ECU switches, the rest stay in the
+    default session, and the tester still sees a positive ``50 03``.
+    """
+    gateway_client.send_diagnostic(b"\x10\x03", target=0xE400)
+    functional_response = gateway_client.wait_diagnostic()
+    assert functional_response[:2] == b"\x50\x03"
+
+    for target in (GATEWAY, ECU_A):
+        gateway_client.send_diagnostic(b"\x27\x01", target=target)
+        seed = gateway_client.wait_diagnostic()
+        # 默认会话里 27 01 是 7F 27 7F；只有真的进了扩展会话才会给种子。
+        assert seed[0] == 0x67, f"0x{target:04X} 仍在默认会话: {seed.hex(' ')}"

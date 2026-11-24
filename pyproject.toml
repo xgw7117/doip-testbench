@@ -30,6 +30,7 @@ dev = [
     "allure-pytest>=2.13",
     "ruff>=0.5",
     "mypy>=1.8",
+    "types-PyYAML>=6.0",
     "udsoncan>=1.24",
     # 互操作检查用第三方 DoIP 客户端，没有它 tools/interop_check.py 跑不起来
     "doipclient>=1.0",

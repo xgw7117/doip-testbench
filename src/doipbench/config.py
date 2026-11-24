@@ -100,11 +100,12 @@ class EcuConfig:
     #: Gateway mode: logical address -> ECU name.  Empty means direct connection
     #: (the ECU answers on ``logical_address`` only).
     routing_table: dict[int, str] = field(default_factory=dict)
-    #: Logical addresses addressed to every ECU at once.  0xE400 is the standard
-    #: OBD functional address and 0xDFFF the "all entities" broadcast; a real
-    #: tester opens with a functional ``10 03`` before anything else, so
-    #: answering 0x8003 here means the very first frame of a session fails.
-    functional_addresses: frozenset[int] = frozenset({0xE400, 0xDFFF})
+    #: 可以一次性寻址到多台 ECU 的逻辑地址。ISO 13400-2 Table 13 把
+    #: 0xE400–0xEFFF 整段划给「厂商定义的功能组地址」，具体用哪几个由 OEM 定，
+    #: 0xE400 是其中最通行的 OBD 功能地址，其余按需加进这个集合。
+    #: 注意 0xD000–0xDFFF 属于 SAE Truck & Bus 保留段，不是广播地址——这里
+    #: 曾经写过 0xDFFF，凭记忆抄的，直到有人拿 Table 13 对着看才发现。
+    functional_addresses: frozenset[int] = frozenset({0xE400})
     security: SecurityConfig = field(default_factory=SecurityConfig)
     dids: dict[int, DidDefinition] = field(default_factory=dict)
     dtcs: list[DtcDefinition] = field(default_factory=list)
@@ -122,6 +123,12 @@ class EcuConfig:
             raise ValueError("logical address must fit in 16 bits")
         if len(self.eid) != 6 or len(self.gid) != 6:
             raise ValueError("EID and GID must be 6 bytes")
+        invalid = sorted(a for a in self.functional_addresses if not 0xE400 <= a <= 0xEFFF)
+        if invalid:
+            raise ValueError(
+                "functional addresses must lie in 0xE400-0xEFFF "
+                f"(ISO 13400-2 Table 13); got {[hex(a) for a in invalid]}"
+            )
 
     def get_did(self, did: int) -> DidDefinition | None:
         """Return the DID definition or ``None`` when it is not supported."""
