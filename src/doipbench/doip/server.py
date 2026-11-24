@@ -645,11 +645,18 @@ class DoIPServer:
             return state
 
     def reset_state(self) -> None:
-        """Restore DID values and DTCs to their factory defaults."""
+        """Restore DIDs, DTCs and routing activation to their factory defaults."""
         with self._lock:
             states = list(self._states.values())
+            connections = list(self._connections.values())
         for state in states:
             state.reset()
+        # 上一条用例的 socket 可能还没被服务端回收：客户端 close 到服务端读到
+        # EOF 之间有一个窗口，在那之前它的激活记录仍然有效。不在这里清掉，
+        # 下一条用例用同一个 SA 建连就会被 0x03 拒掉——这是测试之间的竞态，
+        # 不是协议行为，所以只清测试钩子触达的状态。
+        for connection in connections:
+            connection.routing = RoutingState()
 
     # ------------------------------------------------------------- internals
     def _accept_loop(self) -> None:
