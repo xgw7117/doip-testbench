@@ -38,7 +38,7 @@ Handler = Callable[[bytes], bytes]
 class _Download:
     """一次 0x34 → 0x36* → 0x37 刷写事务的连接级状态。
 
-    next_counter 不是"已收到几块"，而是要 tester 下一块用的
+    ``next_counter`` 不是"已收到几块"，而是要 tester 下一块用的
     blockSequenceCounter：从 0x01 开始，0xFF 之后回 0x00，0x00 之后回 0x01。
     拿"块数"去比对是这块最常见的实现错误。
     """
@@ -83,7 +83,7 @@ class UdsServer:
         self.last_activity = clock()
         self._seeds = SeedGenerator(config.security)
         self._download: _Download | None = None
-        #: 懒分配：只有真发起 0x34 才占这块内存。
+        #: 懒分配：只有真发起 0x34 才占这块内存，几百个测试实例不至于各占 64 KB。
         self._flash: bytearray | None = None
         self._handlers: dict[int, Handler] = {
             ServiceId.DIAGNOSTIC_SESSION_CONTROL: self._diagnostic_session_control,
@@ -96,6 +96,7 @@ class UdsServer:
             ServiceId.TRANSFER_DATA: self._transfer_data,
             ServiceId.REQUEST_TRANSFER_EXIT: self._request_transfer_exit,
             ServiceId.ECU_RESET: self._ecu_reset,
+            ServiceId.CLEAR_DIAGNOSTIC_INFORMATION: self._clear_diagnostic_information,
             ServiceId.ROUTINE_CONTROL: self._routine_control,
         }
 
@@ -125,12 +126,25 @@ class UdsServer:
     def reset(self) -> None:
         """Return to the default session and lock security access."""
         self._reset_to_default()
+        # 只有"工厂重置"才清安全计数。0x10 切会话走的也是 _reset_to_default，
+        # 但那条路不能清，否则切一次会话就把 0x27 的锁定绕过去了。
+        self.failed_attempts = 0
+        self.lockout_until = 0.0
         self.last_activity = self._clock()
         self._seeds.reset()
 
     # ------------------------------------------------------------- internals
     def _reset_to_default(self) -> None:
-        # 故意不重置 failed_attempts / lockout_until：切会话不能解除安全锁定。
+        """Full reset: back to the default session, security locked.
+
+        Used by the S3 timer and by 0x11, i.e. the two events that really do
+        mean "this ECU just went back to square one".  A 0x10 that merely
+        changes session must NOT call this - see ``_diagnostic_session_control``
+        for why.
+
+        ``failed_attempts`` / ``lockout_until`` are deliberately untouched:
+        they are brute force counters, not session state.
+        """
         self.session = Session.DEFAULT
         self.security_level = 0
         self.pending_seed = None
@@ -167,8 +181,18 @@ class UdsServer:
         except ValueError as exc:
             raise UdsNegativeResponse(NRC.SUB_FUNCTION_NOT_SUPPORTED) from exc
 
-        self._reset_to_default()
+        # ISO 14229-1 的会话迁移表只在**回到默认会话**时要求复位安全访问。
+        # 扩展 -> 编程 是真实 OEM 的常规序列（扩展会话里解锁，再切编程会话
+        # 做下载），如果切会话就清 security_level，34 必然回 0x33。原来这里
+        # 无条件调用 _reset_to_default()，正好把这个坑埋进了自己写的 flash()
+        # 里（它走 10 02 -> 27，绕开了），所以 213 条用例一条都没抓到。
+        #
+        # pending_seed 和半截刷写事务跟着会话走，无论切到哪都要丢掉。
         self.session = session
+        self.pending_seed = None
+        self._download = None
+        if session is Session.DEFAULT:
+            self.security_level = 0
         logger.debug("session changed to 0x%02X", target)
 
         if self._suppress(raw):
@@ -229,7 +253,7 @@ class UdsServer:
         if now < self.lockout_until:
             return True
         if self.lockout_until:
-            # 窗口已过：重新给满 max_attempts，否则错一次就再锁一轮。
+            # 窗口已经过去了：把尝试次数补满，否则下一次输错又立刻触发一整轮锁定。
             self.failed_attempts = 0
             self.lockout_until = 0.0
         return False
@@ -314,7 +338,8 @@ class UdsServer:
     def _report_dtc_count(self, request: bytes) -> bytes:
         if len(request) != 3:
             raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
-        # 响应首字节是服务端支持哪些 status bit，跟请求 mask 无关。
+        # 响应首字节是"服务端支持哪些 status bit"，跟请求里带什么 mask 无关。
+        # 回显请求 mask 会让 tester 以为 ECU 只支持它查的那一位，后续掩码全算错。
         available = self.config.dtc_status_availability_mask
         count = len(self.state.dtcs(request[2]))
         return bytes([available, 0x01]) + count.to_bytes(2, "big")
@@ -505,6 +530,21 @@ class UdsServer:
         if self._suppress(raw):
             return b""
         return self._positive(ServiceId.ECU_RESET, sub)
+
+    # ---------------------------------------------------------------- 0x14
+    def _clear_diagnostic_information(self, request: bytes) -> bytes:
+        # ISO 14229-1: groupOfDTC 是 3 字节，0xFFFFFF 表示"清全部"。
+        # 原来只有 0x19 没有 0x14，维修闭环"读故障 -> 修 -> 清故障 -> 复读"
+        # 走到第二步就断了，这里补上闭合。
+        if len(request) != 4:
+            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+        group = int.from_bytes(request[1:4], "big")
+        if group != 0xFFFFFF:
+            known = {dtc.code for dtc in self.state.all_dtcs()}
+            if group not in known:
+                raise UdsNegativeResponse(NRC.REQUEST_OUT_OF_RANGE)
+        self.state.clear_dtcs(group)
+        return self._positive(ServiceId.CLEAR_DIAGNOSTIC_INFORMATION)
 
     # ---------------------------------------------------------------- 0x31
     def _routine_control(self, request: bytes) -> bytes:

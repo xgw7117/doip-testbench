@@ -56,3 +56,18 @@ class EcuState:
                 if dtc.code == code:
                     return copy.deepcopy(dtc)
             return None
+
+    def clear_dtcs(self, group: int) -> int:
+        """Drop DTCs in ``group`` and return how many were removed.
+
+        ``group == 0xFFFFFF`` is the standard "clear all" request.  Otherwise
+        the three byte group is read as a DTC number, which is what 0x14 means
+        when it is not the all-group mask.
+        """
+        with self._lock:
+            before = len(self._dtcs)
+            if group == 0xFFFFFF:
+                self._dtcs = []
+            else:
+                self._dtcs = [dtc for dtc in self._dtcs if dtc.code != group]
+            return before - len(self._dtcs)

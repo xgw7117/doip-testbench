@@ -24,9 +24,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..config import EcuConfig, default_config
+from ..uds.constants import ServiceId
 from ..uds.server import UdsServer
 from ..uds.state import EcuState
 from .constants import (
+    PROTOCOL_VERSION,
     ActivationType,
     DiagnosticAckCode,
     DiagnosticNackCode,
@@ -109,6 +111,11 @@ class _Connection:
     _send_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     #: 最后一次收到字节的时刻。用 ``monotonic`` 是因为墙钟跳变会让空闲判定失效。
     last_activity: float = field(default_factory=time.monotonic)
+    #: 对端用的协议版本。响应必须跟请求同版本，否则 2019 版工具收到 0x02
+    #: 的帧会直接断开，看起来和"版本不支持"一模一样。
+    version: int = PROTOCOL_VERSION
+    #: 收到 11 01/11 03 的正响应后置位，让 run() 退出并关闭 socket。
+    _closing: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         config = self.server.config
@@ -122,7 +129,7 @@ class _Connection:
     def run(self) -> None:
         logger.info("DoIP connection from %s:%d", *self.peer)
         try:
-            while not self.server.stopping:
+            while not self.server.stopping and not self._closing:
                 if self._idle_expired():
                     logger.info(
                         "closing idle connection from %s:%d (%.1fs)",
@@ -145,7 +152,7 @@ class _Connection:
                     self._handle_protocol_error(exc)
                     break
                 for frame in frames:
-                    if self.server.stopping:
+                    if self.server.stopping or self._closing:
                         break
                     self._dispatch(frame)
         finally:
@@ -171,6 +178,11 @@ class _Connection:
     def _close(self) -> None:
         with self.server._lock:  # noqa: SLF001 - tight coupling is intentional
             self.server._connections.pop(self.sock, None)  # noqa: SLF001
+        # shutdown 先于 close：不带它，对端可能只收到 RST 或者干脆要等到
+        # 内核超时。刷写工具"发 11 01 -> 等 socket 关闭 -> 重连读版本"的
+        # 逻辑靠的就是这里的 FIN。
+        with contextlib.suppress(OSError):
+            self.sock.shutdown(socket.SHUT_RDWR)
         with contextlib.suppress(OSError):
             self.sock.close()
 
@@ -181,6 +193,7 @@ class _Connection:
 
     # -------------------------------------------------------------- dispatch
     def _dispatch(self, frame: DoIPFrame) -> None:
+        self.version = frame.protocol_version
         handlers: dict[int, Callable[[DoIPFrame], None]] = {
             PayloadType.VEHICLE_IDENTIFICATION_REQUEST: self._vehicle_identification,
             PayloadType.VEHICLE_IDENTIFICATION_REQUEST_EID: self._vehicle_identification,
@@ -261,10 +274,18 @@ class _Connection:
             return RoutingActivationResponseCode.DENIED_UNKNOWN_SOURCE_ADDRESS
         if config.allowed_testers is not None and client_address not in config.allowed_testers:
             return RoutingActivationResponseCode.DENIED_UNKNOWN_SOURCE_ADDRESS
+
+        # 0x03 的定义是"这个 SA 已经在**另一条** socket 上激活"。原实现把它
+        # 落在"本 socket 重复激活"分支上，结果同一 SA 开两条连接都能拿到
+        # 0x10，而真正该被拒的那种情况反而放行。
+        if self.server.sa_active_elsewhere(client_address, exclude=self.sock):
+            return RoutingActivationResponseCode.DENIED_SA_ALREADY_REGISTERED
+
         if self.routing.activated:
             if client_address == self.routing.client_address:
-                return RoutingActivationResponseCode.DENIED_SA_ALREADY_REGISTERED
+                return RoutingActivationResponseCode.ACCEPTED  # 同一 socket 重申，幂等
             return RoutingActivationResponseCode.DENIED_SA_DIFFERENT_FROM_ALREADY_ACTIVATED
+
         if self.server.activated_sockets() >= config.max_concurrent_sockets:
             return RoutingActivationResponseCode.DENIED_ALL_SOCKETS_REGISTERED
         return RoutingActivationResponseCode.ACCEPTED
@@ -272,6 +293,9 @@ class _Connection:
     # ---------------------------------------------------------------- 0x0007
     def _alive_check(self, frame: DoIPFrame) -> None:
         if not self.routing.activated:
+            # ISO 13400-2 §9.4.4：存活检查只对已激活的连接有意义。未激活就收到
+            # 0x0007，说明 tester 跳过了路由激活，直接关闭而不是回一个 SA=0x0000
+            # 的假响应——那个响应会让 tester 把 0x0000 当成 ECU 的逻辑地址。
             logger.warning("alive check on unactivated connection from %s:%d, closing", *self.peer)
             self._close()
             return
@@ -311,10 +335,22 @@ class _Connection:
         if source != self.routing.client_address:
             self._send_diagnostic_nack(source, target, DiagnosticNackCode.INVALID_SOURCE_ADDRESS)
             return
-        uds = self.uds_map.get(target)
-        if uds is None:
-            self._send_diagnostic_nack(source, target, DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS)
-            return
+
+        # 功能寻址是真实 tester 的第一步：一帧 10 03 把总线上所有 ECU 叫起来。
+        # 只认单播时 TA=0xE400 会直接回 0x8003，后面整条诊断序列一步都走不了，
+        # 而自己写的 shell 从不发功能寻址，所以用例集也永远发现不了。
+        functional = target in self.server.config.functional_addresses
+        if functional:
+            targets = sorted(self.uds_map.items())
+        else:
+            uds = self.uds_map.get(target)
+            if uds is None:
+                self._send_diagnostic_nack(
+                    source, target, DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS
+                )
+                return
+            targets = [(target, uds)]
+
         if len(uds_request) > self.server.config.max_data_size:
             self._send_diagnostic_nack(
                 source, target, DiagnosticNackCode.DIAGNOSTIC_MESSAGE_TOO_LARGE
@@ -325,7 +361,11 @@ class _Connection:
             return
 
         if self.server.config.ack_diagnostic_messages:
-            # SA 是发出这一帧的实体，不是请求里的目标地址。
+            # ISO 13400-2 §9.5.2：请求先被确认，诊断响应随后单独发。
+            # SA 必须是"发出这一帧的实体"——也就是 DoIP 实体的地址，而不是
+            # 请求里的目标地址：网关转发时目标在总线后面，确认却由网关自己发。
+            # TA 是 tester。照抄请求里的顺序，客户端会认为"这条不是给我的"
+            # 然后丢进日志，最后超时。
             ack = (
                 self.server.config.entity_address.to_bytes(2, "big")
                 + source.to_bytes(2, "big")
@@ -333,20 +373,29 @@ class _Connection:
             )
             self._send(PayloadType.DIAGNOSTIC_MESSAGE_ACK, ack)
 
-        uds_response = uds.handle(uds_request)
-        if not uds_response:
-            return  # positive response suppressed by the tester
-
-        response = (
-            target.to_bytes(2, "big")
-            + self.routing.client_address.to_bytes(2, "big")
-            + uds_response
-        )
-        self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
+        for address, uds in targets:
+            uds_response = uds.handle(uds_request)
+            if not uds_response:
+                continue  # positive response suppressed by the tester
+            # 功能寻址时 SA 是回应的那台 ECU，不是 0xE400；单播时两者相同。
+            response = (
+                address.to_bytes(2, "big")
+                + self.routing.client_address.to_bytes(2, "big")
+                + uds_response
+            )
+            self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
+            if uds_response[0] == ServiceId.ECU_RESET + 0x40:
+                # 真 ECU 复位会断链。刷写工具的标准动作是"发 11 01 -> 等
+                # socket 关闭 -> 重连 -> 读版本确认"，不断链它只能等到超时。
+                self._closing = True
+            if functional:
+                # 多个 ECU 同时应答会撞车，这里只回第一个；真实总线靠响应
+                # 抑制位或不同 SA 区分，教学实现不需要做到那一步。
+                break
 
     # -------------------------------------------------------------- tx helpers
     def _send(self, payload_type: int, payload: bytes = b"") -> None:
-        frame = DoIPFrame(payload_type, payload)
+        frame = DoIPFrame(payload_type, payload, self.version)
         with self._send_lock:
             try:
                 self.sock.sendall(frame.encode())
@@ -386,6 +435,9 @@ class _UdpEndpoint:
         self.sock.bind((server.host, server.port))
         self.sock.settimeout(0.2)
         self._thread: threading.Thread | None = None
+        #: UDP 每个报文独立处理，单线程串行，所以用实例字段记住最近一次
+        #: 请求的版本就够了：响应必须跟请求同版本。
+        self._version: int = PROTOCOL_VERSION
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="doip-udp", daemon=True)
@@ -423,6 +475,8 @@ class _UdpEndpoint:
             # Truncated datagram: there is no payload type to quote back, so a
             # NACK would be a guess. Drop it and let the tester time out.
             return
+
+        self._version = frame.protocol_version
 
         if frame.payload_type not in UDP_PAYLOAD_TYPES:
             logger.warning(
@@ -478,7 +532,7 @@ class _UdpEndpoint:
 
     # ------------------------------------------------------------------ tx
     def _send(self, payload_type: int, payload: bytes, peer: tuple[str, int]) -> None:
-        self.sock.sendto(DoIPFrame(payload_type, payload).encode(), peer)
+        self.sock.sendto(DoIPFrame(payload_type, payload, self._version).encode(), peer)
 
     def _nack(self, payload_type: int | None, code: int, peer: tuple[str, int]) -> None:
         quoted = (payload_type or 0).to_bytes(2, "big")
@@ -558,6 +612,18 @@ class DoIPServer:
         """Number of sockets that completed routing activation."""
         with self._lock:
             return sum(1 for c in self._connections.values() if c.routing.activated)
+
+    def sa_active_elsewhere(
+        self, client_address: int, exclude: socket.socket | None = None
+    ) -> bool:
+        """True when another connection already holds ``client_address``."""
+        with self._lock:
+            return any(
+                c.sock is not exclude
+                and c.routing.activated
+                and c.routing.client_address == client_address
+                for c in self._connections.values()
+            )
 
     def open_sockets(self) -> int:
         """Number of currently open TCP connections."""

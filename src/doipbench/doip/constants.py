@@ -58,6 +58,8 @@ class RoutingActivationResponseCode(IntEnum):
 class DiagnosticAckCode(IntEnum):
     """Acknowledgement code carried by payload type 0x8002."""
 
+    #: "diagnostic message correctly received and processed" - the only value
+    #: defined for the positive acknowledgement.
     ACCEPTED = 0x00
 
 
@@ -109,8 +111,15 @@ DOIP_HEADER_SIZE = 8
 #: Protocol version implemented by this test bench (ISO 13400-2:2012).
 PROTOCOL_VERSION = 0x02
 
-#: Protocol version of ISO 13400-2:2019.  Accepted on decode for reference only.
+#: Protocol version of ISO 13400-2:2019.
 PROTOCOL_VERSION_2019 = 0x03
+
+#: Versions the header decoder accepts.  Both are wire compatible here: the
+#: 2019 revision changed payload semantics, not the 8 byte header, so a tester
+#: that opens with 0x03 can be served by the same parser.  Replying with the
+#: version the tester used matters more than accepting it - a 2019 tool that
+#: gets a 0x02 frame back drops the connection just as fast.
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, PROTOCOL_VERSION_2019})
 
 #: Upper bound used by the decoder to protect a test bench from absurd lengths.
 DEFAULT_MAX_PAYLOAD_SIZE = 64 * 1024

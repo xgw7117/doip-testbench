@@ -24,6 +24,8 @@ class SecurityConfig:
     delay_seconds: float = 5.0
     #: Demo secret.  A production ECU keeps this in HSMs, never in source code.
     secret: bytes = b"doip-testbench-demo"
+    #: 密钥版本号，经 DID 0xF1A0 对外公布。tester 先读它，再选对应的 secret；
+    #: 版本对不上时报"版本不匹配"，而不是让 0x27 回一个看不出原因的 0x35。
     key_version: int = 1
 
     def __post_init__(self) -> None:
@@ -76,22 +78,33 @@ class EcuConfig:
     eid: bytes = bytes.fromhex("001122334455")
     gid: bytes = bytes.fromhex("AABBCCDDEEFF")
     max_concurrent_sockets: int = 3
-    #: 同时存在的 TCP 连接硬上限（含未激活），防止空连接耗尽线程与句柄。
+    #: 同时存在的 TCP 连接硬上限（含尚未路由激活的）。``max_concurrent_sockets``
+    #: 只管"已激活"的连接，空连接不受它约束，所以另设一个防耗尽的上限。
     max_open_sockets: int = 16
     #: 单条连接的空闲上限（秒）。超时后服务端主动关闭连接。``None`` 关闭该机制。
     #: 没有它，拔网线/掉电的 tester 只能等内核重传耗尽（十几分钟）才被清理，
     #: 期间一直占着 ``max_concurrent_sockets`` 的名额。
     inactivity_timeout: float | None = 300.0
     max_data_size: int = 4096
+    #: 收到 0x8001 后是否先回一帧 0x8002（诊断消息正向确认）。
+    #: tester 发完诊断请求会等这一帧，再等着收诊断响应；不回的实现在
+    #: ``python-doipclient`` 这类客户端下表现为"ECU 没有响应"然后超时。
+    #: 直连的边缘节点应当开启；网关后面的内部节点应当关闭，否则 tester
+    #: 会收到两份确认，P6Client 计时被搅乱。
     ack_diagnostic_messages: bool = True
     p2_ms: int = 50
     p2_star_ms: int = 5000
     s3_ms: int = 5000
     #: ``None`` accepts any tester address except 0x0000.
     allowed_testers: frozenset[int] | None = None
-    #: Gateway mode: logical address -> ECU name.  Empty means direct connection.
+    #: Gateway mode: logical address -> ECU name.  Empty means direct connection
+    #: (the ECU answers on ``logical_address`` only).
     routing_table: dict[int, str] = field(default_factory=dict)
-
+    #: Logical addresses addressed to every ECU at once.  0xE400 is the standard
+    #: OBD functional address and 0xDFFF the "all entities" broadcast; a real
+    #: tester opens with a functional ``10 03`` before anything else, so
+    #: answering 0x8003 here means the very first frame of a session fails.
+    functional_addresses: frozenset[int] = frozenset({0xE400, 0xDFFF})
     security: SecurityConfig = field(default_factory=SecurityConfig)
     dids: dict[int, DidDefinition] = field(default_factory=dict)
     dtcs: list[DtcDefinition] = field(default_factory=list)
@@ -122,6 +135,8 @@ def _default_dids(vin: str, key_version: int = 1) -> dict[int, DidDefinition]:
         0xF18C: DidDefinition(0xF18C, "ECU serial number", b"ECU-2026-0001"),
         0xF186: DidDefinition(0xF186, "Active diagnostic session", b"\x01"),
         0xF195: DidDefinition(0xF195, "Software version", b"SW 01.04.02"),
+        #: 密钥版本。0xF1A0 是 OEM 自定义区（ISO 14229-1 把 0xF180-0xF1FF 留给
+        #: 车厂），真车上叫什么各厂不一，作用都一样：让 tester 知道自己该用哪套密钥。
         0xF1A0: DidDefinition(0xF1A0, "Security key version", bytes([key_version & 0xFF])),
         0x0100: DidDefinition(
             0x0100,

@@ -19,7 +19,12 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from .constants import DEFAULT_MAX_PAYLOAD_SIZE, DOIP_HEADER_SIZE, PROTOCOL_VERSION
+from .constants import (
+    DEFAULT_MAX_PAYLOAD_SIZE,
+    DOIP_HEADER_SIZE,
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+)
 
 _HEADER = struct.Struct(">BBHI")
 
@@ -91,7 +96,11 @@ class DoIPFrame:
 
 def _read_header(data: bytes | bytearray, offset: int = 0) -> tuple[int, int, int]:
     version, inverse, payload_type, length = _HEADER.unpack_from(data, offset)
-    if version != PROTOCOL_VERSION:
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        # ISO 13400-2 has no NACK code for "wrong version" and requires the
+        # socket to be closed, so ``send_nack`` stays False here.  Answering
+        # with a generic NACK would be non-conforming even though it looks
+        # friendlier.
         raise InvalidProtocolVersion(
             f"unsupported DoIP protocol version 0x{version:02X}",
             payload_type=payload_type,

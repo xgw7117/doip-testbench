@@ -8,11 +8,44 @@ suite fast (no rebinding per case) without leaking state between tests.
 from __future__ import annotations
 
 import socket
+import sys
 import time
+import types
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+# allure 是报告插件，不该成为"能不能跑测试"的前提。只装运行依赖
+# (pip install -e .) 时它不在，测试目录连收集都会失败；这里注入一个空壳，
+# 把 @allure.step / @allure.feature 变成直通装饰器。装了 allure-pytest 的
+# 环境不受影响，走的仍是真正的包。
+try:  # pragma: no cover - depends on how the environment was built
+    import allure  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover
+
+    def _identity(*args: object, **kwargs: object) -> object:
+        """Accept both ``@allure.step`` and ``@allure.step("text")``."""
+        if len(args) == 1 and not kwargs and callable(args[0]):
+            return args[0]
+        return lambda func: func
+
+    def _sink(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    class _Dynamic:
+        description = staticmethod(_sink)
+        severity = staticmethod(_sink)
+        tag = staticmethod(_sink)
+        title = staticmethod(_sink)
+
+    _stub = types.ModuleType("allure")
+    for _name in ("step", "feature", "story", "title", "severity", "description", "link"):
+        setattr(_stub, _name, _identity)
+    _stub.attach = _sink
+    _stub.attachment_type = types.SimpleNamespace(TEXT="text", JSON="json", PNG="png")
+    _stub.dynamic = _Dynamic()
+    sys.modules["allure"] = _stub
 
 from doipbench.config import EcuConfig, SecurityConfig, default_config
 from doipbench.doip import DoIPClient, DoIPServer

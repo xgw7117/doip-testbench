@@ -202,7 +202,7 @@ def flash(client, path, address, secret):
     print("[6] 31 01 FF01    verify      ok")
 
     send(client, b"\x11\x01")
-    print("\nprogrammed. switch back with 10 01 when you are done.")
+    print("\nprogrammed. ECU reset and closed the connection - restart the shell to continue.")
     return True
 
 

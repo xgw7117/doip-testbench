@@ -65,6 +65,12 @@ jobs:
           pytest --cov=doipbench --cov-report=term-missing \
                  --cov-report=xml --alluredir=allure-results
 
+      - name: Interoperability check (third-party client)
+        # 用别人写的客户端打一遍自己：一致性用例全由自带客户端发出，属于
+        # "自己拉自己"，只有这一步能证明字节层面还有第二个人认。
+        if: matrix.python-version == '3.12'
+        run: python tools/interop_check.py
+
       - name: Upload Allure raw results
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,0 +1,1090 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index a6a8095..682ecf7 100755
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -65,6 +65,12 @@ jobs:
+           pytest --cov=doipbench --cov-report=term-missing \
+                  --cov-report=xml --alluredir=allure-results
+ 
++      - name: Interoperability check (third-party client)
++        # 用别人写的客户端打一遍自己：一致性用例全由自带客户端发出，属于
++        # "自己拉自己"，只有这一步能证明字节层面还有第二个人认。
++        if: matrix.python-version == '3.12'
++        run: python tools/interop_check.py
++
+       - name: Upload Allure raw results
+         if: always()
+         uses: actions/upload-artifact@v4
+diff --git a/README.md b/README.md
+index 9ff8450..4aa4976 100755
+--- a/README.md
++++ b/README.md
+@@ -1,10 +1,10 @@
+ # doip-testbench
+ 
+-用 Python 从零实现的 DoIP 实体（ISO 13400-2）和一个虚拟 ECU，配 213 条自动化用例，外加一个能直接敲命令的交互终端。不需要 CANoe，不需要硬件，clone 下来两分钟能跟一个"车"对话。
++用 Python 从零实现的 DoIP 实体（ISO 13400-2）和一个虚拟 ECU，配 221 条自动化用例，外加一个能直接敲命令的交互终端。**CANoe 教你协议，帮不了你 CI；这个能。** 不需要硬件，clone 下来两分钟能跟一个"车"对话。
+ 
+ ![CI](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml/badge.svg) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+ 
+-在线报告：[Allure · 213 passed](https://xgw7117.github.io/doip-testbench/)
++在线报告：[Allure · 221 passed](https://xgw7117.github.io/doip-testbench/)
+ 
+ ## 先看它能干什么
+ 
+@@ -38,7 +38,7 @@ programmed.
+ - **被 tester 发现**：UDP 13400 应答车辆识别 / 实体状态 / 电源模式——tester 此时还不知道 ECU 的 IP，广播是唯一的路
+ - **接受诊断**：TCP 13400 路由激活，UDS 十一个服务，含 `31 01 FF00 → 34 → 36* → 37 → 31 01 FF01 → 11` 完整刷写链路
+ - **当网关**：按目标逻辑地址转发给下挂 ECU，回程响应改写 SA / TA，未知地址回 `0x8003`
+-- **当被测对象**：213 条用例直接打它，覆盖 13 类 NRC、超长传输、块计数器乱序、空闲连接回收
++- **当被测对象**：221 条用例直接打它，覆盖 13 类 NRC、超长传输、块计数器乱序、空闲连接回收
+ 
+ ## 快速开始
+ 
+@@ -48,7 +48,7 @@ cd doip-testbench
+ python3 -m venv .venv
+ source .venv/bin/activate
+ pip install -e ".[dev]"
+-pytest          # 213 passed
++pytest          # 221 passed
+ ```
+ 
+ 不需要硬件，也不用 root 或 vcan，测试都在 127.0.0.1 的临时端口上跑。
+@@ -83,14 +83,12 @@ doipbench run tests/data/uds_cases.yaml --start-ecu --port 0
+ 
+ | 协议                         | 做了什么                                                                                                                |
+ | -------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+-| DoIP over TCP（ISO 13400-2） | 8 字节头解析与组帧、路由激活、诊断消息、**诊断消息确认（0x8002）**、Alive Check、0x8001 / 0x8003；按目标逻辑地址转发（网关模式）                                 |
++| DoIP over TCP（ISO 13400-2） | 8 字节头解析与组帧（**接受 0x02 / 0x03，按请求版本回帧**）、路由激活、诊断消息、**诊断消息确认（0x8002）**、**功能寻址 0xE400 / 0xDFFF**、Alive Check、0x8001 / 0x8003；按目标逻辑地址转发（网关模式）                                 |
+ | DoIP over UDP（ISO 13400-2） | 车辆识别（0x0001 / 0x0002 / 0x0003）、实体状态、电源模式；TCP 专属报文走 UDP 一律回 generic NACK 0x01                                        |
+-| UDS（ISO 14229-1）           | 0x10 会话、0x27 安全访问、0x22 读数据、0x2E 写数据、0x19 读 DTC、0x3E 保持连接；0x34 / 0x36 / 0x37 刷写数据传输、0x31 擦除与 CRC 校验、0x11 复位；13 类 NRC |
+-| SOME/IP                    | 头部和 SD 报文的编解码，**没有做服务端**                                                                                            |
+-| gPTP / VLAN                | IEEE 802.1AS 头部解析、802.1Q 标签                                                                                         |
+-| ISO-TP（ISO 15765-2）        | 分段和重组，用于理解 CAN 侧的长报文传输                                                                                              |
++| UDS（ISO 14229-1）           | 0x10 会话、0x27 安全访问、0x22 读数据、0x2E 写数据、0x19 读 DTC、**0x14 清 DTC**、0x3E 保持连接；0x34 / 0x36 / 0x37 刷写数据传输、0x31 擦除与 CRC 校验、0x11 复位（**复位后关连接**）；13 类 NRC |
++| SOME/IP、gPTP / VLAN、ISO-TP  | **独立实现，未接入 DoIP 链路**，只被单元测试覆盖。读相邻协议用，不算这个台子的能力                                                                        |
+ 
+-## 三个刻意的设计选择
++## 四个刻意的设计选择
+ 
+ **1. 0x8002 的 SA 填自己，不填请求里的目标地址。**
+ 
+@@ -104,14 +102,20 @@ doipbench run tests/data/uds_cases.yaml --start-ecu --port 0
+ 
+ ECU 只在"5 秒没收到任何请求"时退回默认会话，这是防止 tester 崩溃后一直停在编程会话、保持解锁状态。保活是 tester 的责任（周期发 `3E 80`），不是 ECU 的。
+ 
++**4. 切会话不复位安全访问，只有回默认会话才复位。**
++
++ISO 14229-1 的会话迁移表就是这么写的，但直觉相反：`10 03 -> 27 -> 10 02 -> 34` 是真实 OEM 很常见的刷写序列，切一次会话就把解锁状态清掉，`34` 必然回 `0x33`。
++
++这条**写错过一次**。更值得记的是它为什么没被发现：`tools/uds_shell.py` 的 `flash()` 走的是 `10 02 -> 27`，正好绕开了这条路径，于是用例集和工具链从同一个错误认知里长出来，互相印证，全绿。现在有一条回归用例专门钉住它。
++
+ ## 测试
+ 
+-一共 213 条，跑完 `pytest` 的最后一行就是这个数：
++一共 221 条，跑完 `pytest` 的最后一行就是这个数：
+ 
+ | 层     | 条数  | 测什么                                                    | 位置                   |
+ | ----- | --- | ------------------------------------------------------ | -------------------- |
+ | 单元    | 114 | 编解码、状态机、YAML 加载器，不碰网络                                  | `tests/unit/`        |
+-| 协议一致性 | 85  | UDS 服务用例（YAML 数据驱动）、TCP 报文用例、UDP 报文用例、0x8002 确认的正反两个方向 | `tests/conformance/` |
++| 协议一致性 | 93  | UDS 服务用例（YAML 数据驱动）、TCP 报文用例、UDP 报文用例、0x8002 确认的正反两个方向、双协议版本、功能寻址、2019 版握手 | `tests/conformance/` |
+ | 端到端   | 14  | 会话切换、安全锁定、两个 tester 同时连接、网关转发                          | `tests/functional/`  |
+ 
+ GitHub Actions 上用 Python 3.10 / 3.11 / 3.12 各跑一遍。
+@@ -137,9 +141,9 @@ cases:
+ src/doipbench/
+ ├── doip/         帧解析、服务端、客户端
+ ├── uds/          十一个服务、会话与安全状态机
+-├── someip/       SOME/IP 头 + SD
+-├── net/          VLAN、gPTP
+-├── transport/    ISO-TP
++├── someip/       SOME/IP 头 + SD（未接入 DoIP 链路）
++├── net/          VLAN、gPTP（未接入）
++├── transport/    ISO-TP（未接入）
+ ├── testing/      YAML 用例加载
+ ├── config.py     ECU 配置
+ └── cli.py        serve / run / identify / frame
+@@ -156,11 +160,15 @@ tests/
+ 
+ ## 已知限制
+ 
+-- 没有和真实 ECU 对接过。这台"车"是纯软件。
+-- 安全访问用的是 `SHA-256(secret ‖ seed)` 拼接派生。这个构造有长度扩展风险，生产环境应改 HMAC-SHA256 或 AES-CMAC。`SecurityConfig.key_version` 经 DID `0xF1A0` 公布，tester 启动时比对，版本不一致会直接报出来，而不是回一个看不出原因的 `0x35`。
++这一节是照着实测探针写的，不是照着"想做但没做"写的。每条都能被复现。
++
++- **没有和真实 ECU 对接过。** 这台"车"是纯软件，`tools/interop_check.py` 里的 `doipclient` 是唯一的第三方参照，而且只有 5 步。
++- **SOME/IP、gPTP / VLAN、ISO-TP 三个模块没有接入 DoIP 链路。** 它们在 `src/` 里零引用，只被自己的单元测试覆盖。读相邻协议用，不算这个台子的能力。
++- **一致性用例多数由本项目自带客户端发出。** 验证的是"我的编码器和我的解码器互相同意"，不是"标准同意"。新增的 6 条改用裸 socket，专测客户端库自己发不出来的报文（2019 版开头、功能寻址、复位断链）。
++- **安全访问的种子可预测。** 算法是 `key = seed XOR SHA-256(secret ‖ seed)`，XOR 截断本身消解了长度扩展攻击——真正的洞在别处：计数器从 0 起、secret 在源码里，于是每轮上电的第一颗种子恒定，抓一对 `27 01/27 02` 就能永久重放。计数器已改为随机起始，但 secret 仍在源码里，生产环境该放 HSM。
+ - 刷写数据只落在内存里一块 `flash_size` 的缓冲区，**断电即丢**。指纹写入、刷写依赖检查、段地址映射、NVM 持久化都没做，所以它不是能刷真 ECU 的刷写器。
+ - 网关是**进程内的逻辑地址路由**：按目标地址把请求分发到下挂的 UDS 实例，不是真的两跳网络。DoIP 的 entity 多跳（跨 entity 转发）没做。
+-- Alive Check 只做被动的 `0x0007 → 0x0008` 应答，不主动发探活包。
++- Alive Check 只做被动的 `0x0007 -> 0x0008` 应答，不主动发探活包。
+ - 空闲连接靠 `inactivity_timeout`（默认 300 s，`None` 关闭）回收——拔线 / 掉电的 tester 不会发 FIN 或 RST，否则只能等内核重传耗尽（约 15 分钟），期间一直占着 `max_concurrent_sockets` 的名额。
+ - UDP 只放发现类报文。诊断和 Alive Check 只能走 TCP，往 UDP 上发会收到 generic NACK——不是没实现，是标准不允许。
+ - 网关模式没有 CLI 开关，要在代码里传路由表：
+@@ -180,6 +188,8 @@ with DoIPServer(config, port=13400) as server:
+ 
+ 本项目实现了版本号这一层：`SecurityConfig.key_version` 经 DID `0xF1A0` 公布，`uds_shell` 启动时读一次，对不上就打印 `key version: ECU v2, local v1  MISMATCH`。
+ 
++种子本身也做了处理：计数器每轮上电从随机值起，所以第一颗种子不再是一个可以离线算出来的常量。但 secret 仍然在 `config.py` 里——这一层必须靠 HSM，代码修不了。
++
+ HSM、SeedKey DLL、密钥派生与轮换、解锁审计日志都没做，这些属于密钥管理系统（KMS），不在一个诊断测试台的范围内。
+ 
+ ## 参考标准
+diff --git a/pyproject.toml b/pyproject.toml
+index 4ad7ef6..e5e51d8 100755
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
+ build-backend = "setuptools.build_meta"
+ 
+ [project]
+-name = "doip-testbench"
++name = "doipbench"
+ version = "0.5.0"
+ description = "A hardware-free DoIP/UDS test bench: virtual ECU, protocol conformance suite and CI-ready diagnostics automation."
+ readme = "README.md"
+@@ -31,6 +31,8 @@ dev = [
+     "ruff>=0.5",
+     "mypy>=1.8",
+     "udsoncan>=1.24",
++    # 互操作检查用第三方 DoIP 客户端，没有它 tools/interop_check.py 跑不起来
++    "doipclient>=1.0",
+ ]
+ 
+ [project.scripts]
+diff --git a/src/doipbench/config.py b/src/doipbench/config.py
+index 4a60397..53c29da 100755
+--- a/src/doipbench/config.py
++++ b/src/doipbench/config.py
+@@ -24,6 +24,8 @@ class SecurityConfig:
+     delay_seconds: float = 5.0
+     #: Demo secret.  A production ECU keeps this in HSMs, never in source code.
+     secret: bytes = b"doip-testbench-demo"
++    #: 密钥版本号，经 DID 0xF1A0 对外公布。tester 先读它，再选对应的 secret；
++    #: 版本对不上时报"版本不匹配"，而不是让 0x27 回一个看不出原因的 0x35。
+     key_version: int = 1
+ 
+     def __post_init__(self) -> None:
+@@ -76,22 +78,33 @@ class EcuConfig:
+     eid: bytes = bytes.fromhex("001122334455")
+     gid: bytes = bytes.fromhex("AABBCCDDEEFF")
+     max_concurrent_sockets: int = 3
+-    #: 同时存在的 TCP 连接硬上限（含未激活），防止空连接耗尽线程与句柄。
++    #: 同时存在的 TCP 连接硬上限（含尚未路由激活的）。``max_concurrent_sockets``
++    #: 只管"已激活"的连接，空连接不受它约束，所以另设一个防耗尽的上限。
+     max_open_sockets: int = 16
+     #: 单条连接的空闲上限（秒）。超时后服务端主动关闭连接。``None`` 关闭该机制。
+     #: 没有它，拔网线/掉电的 tester 只能等内核重传耗尽（十几分钟）才被清理，
+     #: 期间一直占着 ``max_concurrent_sockets`` 的名额。
+     inactivity_timeout: float | None = 300.0
+     max_data_size: int = 4096
++    #: 收到 0x8001 后是否先回一帧 0x8002（诊断消息正向确认）。
++    #: tester 发完诊断请求会等这一帧，再等着收诊断响应；不回的实现在
++    #: ``doipclient`` 这类客户端下表现为"ECU 没有响应"然后超时。
++    #: 直连的边缘节点应当开启；网关后面的内部节点应当关闭，否则 tester
++    #: 会收到两份确认，P6Client 计时被搅乱。
+     ack_diagnostic_messages: bool = True
+     p2_ms: int = 50
+     p2_star_ms: int = 5000
+     s3_ms: int = 5000
+     #: ``None`` accepts any tester address except 0x0000.
+     allowed_testers: frozenset[int] | None = None
+-    #: Gateway mode: logical address -> ECU name.  Empty means direct connection.
++    #: Gateway mode: logical address -> ECU name.  Empty means direct connection
++    #: (the ECU answers on ``logical_address`` only).
+     routing_table: dict[int, str] = field(default_factory=dict)
+-
++    #: Logical addresses addressed to every ECU at once.  0xE400 is the standard
++    #: OBD functional address and 0xDFFF the "all entities" broadcast; a real
++    #: tester opens with a functional ``10 03`` before anything else, so
++    #: answering 0x8003 here means the very first frame of a session fails.
++    functional_addresses: frozenset[int] = frozenset({0xE400, 0xDFFF})
+     security: SecurityConfig = field(default_factory=SecurityConfig)
+     dids: dict[int, DidDefinition] = field(default_factory=dict)
+     dtcs: list[DtcDefinition] = field(default_factory=list)
+@@ -122,6 +135,8 @@ def _default_dids(vin: str, key_version: int = 1) -> dict[int, DidDefinition]:
+         0xF18C: DidDefinition(0xF18C, "ECU serial number", b"ECU-2026-0001"),
+         0xF186: DidDefinition(0xF186, "Active diagnostic session", b"\x01"),
+         0xF195: DidDefinition(0xF195, "Software version", b"SW 01.04.02"),
++        #: 密钥版本。0xF1A0 是 OEM 自定义区（ISO 14229-1 把 0xF180-0xF1FF 留给
++        #: 车厂），真车上叫什么各厂不一，作用都一样：让 tester 知道自己该用哪套密钥。
+         0xF1A0: DidDefinition(0xF1A0, "Security key version", bytes([key_version & 0xFF])),
+         0x0100: DidDefinition(
+             0x0100,
+diff --git a/src/doipbench/doip/constants.py b/src/doipbench/doip/constants.py
+index 3b22cd6..274cfbb 100755
+--- a/src/doipbench/doip/constants.py
++++ b/src/doipbench/doip/constants.py
+@@ -58,6 +58,8 @@ class RoutingActivationResponseCode(IntEnum):
+ class DiagnosticAckCode(IntEnum):
+     """Acknowledgement code carried by payload type 0x8002."""
+ 
++    #: "diagnostic message correctly received and processed" - the only value
++    #: defined for the positive acknowledgement.
+     ACCEPTED = 0x00
+ 
+ 
+@@ -109,8 +111,15 @@ DOIP_HEADER_SIZE = 8
+ #: Protocol version implemented by this test bench (ISO 13400-2:2012).
+ PROTOCOL_VERSION = 0x02
+ 
+-#: Protocol version of ISO 13400-2:2019.  Accepted on decode for reference only.
++#: Protocol version of ISO 13400-2:2019.
+ PROTOCOL_VERSION_2019 = 0x03
+ 
++#: Versions the header decoder accepts.  Both are wire compatible here: the
++#: 2019 revision changed payload semantics, not the 8 byte header, so a tester
++#: that opens with 0x03 can be served by the same parser.  Replying with the
++#: version the tester used matters more than accepting it - a 2019 tool that
++#: gets a 0x02 frame back drops the connection just as fast.
++SUPPORTED_PROTOCOL_VERSIONS = frozenset({PROTOCOL_VERSION, PROTOCOL_VERSION_2019})
++
+ #: Upper bound used by the decoder to protect a test bench from absurd lengths.
+ DEFAULT_MAX_PAYLOAD_SIZE = 64 * 1024
+diff --git a/src/doipbench/doip/frame.py b/src/doipbench/doip/frame.py
+index c49b927..ea1c7cf 100755
+--- a/src/doipbench/doip/frame.py
++++ b/src/doipbench/doip/frame.py
+@@ -19,7 +19,12 @@ from __future__ import annotations
+ import struct
+ from dataclasses import dataclass, field
+ 
+-from .constants import DEFAULT_MAX_PAYLOAD_SIZE, DOIP_HEADER_SIZE, PROTOCOL_VERSION
++from .constants import (
++    DEFAULT_MAX_PAYLOAD_SIZE,
++    DOIP_HEADER_SIZE,
++    PROTOCOL_VERSION,
++    SUPPORTED_PROTOCOL_VERSIONS,
++)
+ 
+ _HEADER = struct.Struct(">BBHI")
+ 
+@@ -91,7 +96,11 @@ class DoIPFrame:
+ 
+ def _read_header(data: bytes | bytearray, offset: int = 0) -> tuple[int, int, int]:
+     version, inverse, payload_type, length = _HEADER.unpack_from(data, offset)
+-    if version != PROTOCOL_VERSION:
++    if version not in SUPPORTED_PROTOCOL_VERSIONS:
++        # ISO 13400-2 has no NACK code for "wrong version" and requires the
++        # socket to be closed, so ``send_nack`` stays False here.  Answering
++        # with a generic NACK would be non-conforming even though it looks
++        # friendlier.
+         raise InvalidProtocolVersion(
+             f"unsupported DoIP protocol version 0x{version:02X}",
+             payload_type=payload_type,
+diff --git a/src/doipbench/doip/server.py b/src/doipbench/doip/server.py
+index f7a6894..3ef6e92 100755
+--- a/src/doipbench/doip/server.py
++++ b/src/doipbench/doip/server.py
+@@ -24,9 +24,11 @@ from collections.abc import Callable
+ from dataclasses import dataclass, field
+ 
+ from ..config import EcuConfig, default_config
++from ..uds.constants import ServiceId
+ from ..uds.server import UdsServer
+ from ..uds.state import EcuState
+ from .constants import (
++    PROTOCOL_VERSION,
+     ActivationType,
+     DiagnosticAckCode,
+     DiagnosticNackCode,
+@@ -109,6 +111,11 @@ class _Connection:
+     _send_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+     #: 最后一次收到字节的时刻。用 ``monotonic`` 是因为墙钟跳变会让空闲判定失效。
+     last_activity: float = field(default_factory=time.monotonic)
++    #: 对端用的协议版本。响应必须跟请求同版本，否则 2019 版工具收到 0x02
++    #: 的帧会直接断开，看起来和"版本不支持"一模一样。
++    version: int = PROTOCOL_VERSION
++    #: 收到 11 01/11 03 的正响应后置位，让 run() 退出并关闭 socket。
++    _closing: bool = field(default=False, repr=False)
+ 
+     def __post_init__(self) -> None:
+         config = self.server.config
+@@ -122,7 +129,7 @@ class _Connection:
+     def run(self) -> None:
+         logger.info("DoIP connection from %s:%d", *self.peer)
+         try:
+-            while not self.server.stopping:
++            while not self.server.stopping and not self._closing:
+                 if self._idle_expired():
+                     logger.info(
+                         "closing idle connection from %s:%d (%.1fs)",
+@@ -145,7 +152,7 @@ class _Connection:
+                     self._handle_protocol_error(exc)
+                     break
+                 for frame in frames:
+-                    if self.server.stopping:
++                    if self.server.stopping or self._closing:
+                         break
+                     self._dispatch(frame)
+         finally:
+@@ -171,6 +178,11 @@ class _Connection:
+     def _close(self) -> None:
+         with self.server._lock:  # noqa: SLF001 - tight coupling is intentional
+             self.server._connections.pop(self.sock, None)  # noqa: SLF001
++        # shutdown 先于 close：不带它，对端可能只收到 RST 或者干脆要等到
++        # 内核超时。刷写工具"发 11 01 -> 等 socket 关闭 -> 重连读版本"的
++        # 逻辑靠的就是这里的 FIN。
++        with contextlib.suppress(OSError):
++            self.sock.shutdown(socket.SHUT_RDWR)
+         with contextlib.suppress(OSError):
+             self.sock.close()
+ 
+@@ -181,6 +193,7 @@ class _Connection:
+ 
+     # -------------------------------------------------------------- dispatch
+     def _dispatch(self, frame: DoIPFrame) -> None:
++        self.version = frame.protocol_version
+         handlers: dict[int, Callable[[DoIPFrame], None]] = {
+             PayloadType.VEHICLE_IDENTIFICATION_REQUEST: self._vehicle_identification,
+             PayloadType.VEHICLE_IDENTIFICATION_REQUEST_EID: self._vehicle_identification,
+@@ -261,10 +274,18 @@ class _Connection:
+             return RoutingActivationResponseCode.DENIED_UNKNOWN_SOURCE_ADDRESS
+         if config.allowed_testers is not None and client_address not in config.allowed_testers:
+             return RoutingActivationResponseCode.DENIED_UNKNOWN_SOURCE_ADDRESS
++
++        # 0x03 的定义是"这个 SA 已经在**另一条** socket 上激活"。原实现把它
++        # 落在"本 socket 重复激活"分支上，结果同一 SA 开两条连接都能拿到
++        # 0x10，而真正该被拒的那种情况反而放行。
++        if self.server.sa_active_elsewhere(client_address, exclude=self.sock):
++            return RoutingActivationResponseCode.DENIED_SA_ALREADY_REGISTERED
++
+         if self.routing.activated:
+             if client_address == self.routing.client_address:
+-                return RoutingActivationResponseCode.DENIED_SA_ALREADY_REGISTERED
++                return RoutingActivationResponseCode.ACCEPTED  # 同一 socket 重申，幂等
+             return RoutingActivationResponseCode.DENIED_SA_DIFFERENT_FROM_ALREADY_ACTIVATED
++
+         if self.server.activated_sockets() >= config.max_concurrent_sockets:
+             return RoutingActivationResponseCode.DENIED_ALL_SOCKETS_REGISTERED
+         return RoutingActivationResponseCode.ACCEPTED
+@@ -272,6 +293,9 @@ class _Connection:
+     # ---------------------------------------------------------------- 0x0007
+     def _alive_check(self, frame: DoIPFrame) -> None:
+         if not self.routing.activated:
++            # ISO 13400-2 §9.4.4：存活检查只对已激活的连接有意义。未激活就收到
++            # 0x0007，说明 tester 跳过了路由激活，直接关闭而不是回一个 SA=0x0000
++            # 的假响应——那个响应会让 tester 把 0x0000 当成 ECU 的逻辑地址。
+             logger.warning("alive check on unactivated connection from %s:%d, closing", *self.peer)
+             self._close()
+             return
+@@ -311,10 +335,22 @@ class _Connection:
+         if source != self.routing.client_address:
+             self._send_diagnostic_nack(source, target, DiagnosticNackCode.INVALID_SOURCE_ADDRESS)
+             return
+-        uds = self.uds_map.get(target)
+-        if uds is None:
+-            self._send_diagnostic_nack(source, target, DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS)
+-            return
++
++        # 功能寻址是真实 tester 的第一步：一帧 10 03 把总线上所有 ECU 叫起来。
++        # 只认单播时 TA=0xE400 会直接回 0x8003，后面整条诊断序列一步都走不了，
++        # 而自己写的 shell 从不发功能寻址，所以用例集也永远发现不了。
++        functional = target in self.server.config.functional_addresses
++        if functional:
++            targets = sorted(self.uds_map.items())
++        else:
++            uds = self.uds_map.get(target)
++            if uds is None:
++                self._send_diagnostic_nack(
++                    source, target, DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS
++                )
++                return
++            targets = [(target, uds)]
++
+         if len(uds_request) > self.server.config.max_data_size:
+             self._send_diagnostic_nack(
+                 source, target, DiagnosticNackCode.DIAGNOSTIC_MESSAGE_TOO_LARGE
+@@ -325,7 +361,11 @@ class _Connection:
+             return
+ 
+         if self.server.config.ack_diagnostic_messages:
+-            # SA 是发出这一帧的实体，不是请求里的目标地址。
++            # ISO 13400-2 §9.5.2：请求先被确认，诊断响应随后单独发。
++            # SA 必须是"发出这一帧的实体"——也就是 DoIP 实体的地址，而不是
++            # 请求里的目标地址：网关转发时目标在总线后面，确认却由网关自己发。
++            # TA 是 tester。照抄请求里的顺序，客户端会认为"这条不是给我的"
++            # 然后丢进日志，最后超时。
+             ack = (
+                 self.server.config.entity_address.to_bytes(2, "big")
+                 + source.to_bytes(2, "big")
+@@ -333,20 +373,29 @@ class _Connection:
+             )
+             self._send(PayloadType.DIAGNOSTIC_MESSAGE_ACK, ack)
+ 
+-        uds_response = uds.handle(uds_request)
+-        if not uds_response:
+-            return  # positive response suppressed by the tester
+-
+-        response = (
+-            target.to_bytes(2, "big")
+-            + self.routing.client_address.to_bytes(2, "big")
+-            + uds_response
+-        )
+-        self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
++        for address, uds in targets:
++            uds_response = uds.handle(uds_request)
++            if not uds_response:
++                continue  # positive response suppressed by the tester
++            # 功能寻址时 SA 是回应的那台 ECU，不是 0xE400；单播时两者相同。
++            response = (
++                address.to_bytes(2, "big")
++                + self.routing.client_address.to_bytes(2, "big")
++                + uds_response
++            )
++            self._send(PayloadType.DIAGNOSTIC_MESSAGE, response)
++            if uds_response[0] == ServiceId.ECU_RESET + 0x40:
++                # 真 ECU 复位会断链。刷写工具的标准动作是"发 11 01 -> 等
++                # socket 关闭 -> 重连 -> 读版本确认"，不断链它只能等到超时。
++                self._closing = True
++            if functional:
++                # 多个 ECU 同时应答会撞车，这里只回第一个；真实总线靠响应
++                # 抑制位或不同 SA 区分，教学实现不需要做到那一步。
++                break
+ 
+     # -------------------------------------------------------------- tx helpers
+     def _send(self, payload_type: int, payload: bytes = b"") -> None:
+-        frame = DoIPFrame(payload_type, payload)
++        frame = DoIPFrame(payload_type, payload, self.version)
+         with self._send_lock:
+             try:
+                 self.sock.sendall(frame.encode())
+@@ -386,6 +435,9 @@ class _UdpEndpoint:
+         self.sock.bind((server.host, server.port))
+         self.sock.settimeout(0.2)
+         self._thread: threading.Thread | None = None
++        #: UDP 每个报文独立处理，单线程串行，所以用实例字段记住最近一次
++        #: 请求的版本就够了：响应必须跟请求同版本。
++        self._version: int = PROTOCOL_VERSION
+ 
+     def start(self) -> None:
+         self._thread = threading.Thread(target=self._run, name="doip-udp", daemon=True)
+@@ -424,6 +476,8 @@ class _UdpEndpoint:
+             # NACK would be a guess. Drop it and let the tester time out.
+             return
+ 
++        self._version = frame.protocol_version
++
+         if frame.payload_type not in UDP_PAYLOAD_TYPES:
+             logger.warning(
+                 "payload type 0x%04X is TCP-only, NACK to %s:%d",
+@@ -478,7 +532,7 @@ class _UdpEndpoint:
+ 
+     # ------------------------------------------------------------------ tx
+     def _send(self, payload_type: int, payload: bytes, peer: tuple[str, int]) -> None:
+-        self.sock.sendto(DoIPFrame(payload_type, payload).encode(), peer)
++        self.sock.sendto(DoIPFrame(payload_type, payload, self._version).encode(), peer)
+ 
+     def _nack(self, payload_type: int | None, code: int, peer: tuple[str, int]) -> None:
+         quoted = (payload_type or 0).to_bytes(2, "big")
+@@ -559,6 +613,18 @@ class DoIPServer:
+         with self._lock:
+             return sum(1 for c in self._connections.values() if c.routing.activated)
+ 
++    def sa_active_elsewhere(
++        self, client_address: int, exclude: socket.socket | None = None
++    ) -> bool:
++        """True when another connection already holds ``client_address``."""
++        with self._lock:
++            return any(
++                c.sock is not exclude
++                and c.routing.activated
++                and c.routing.client_address == client_address
++                for c in self._connections.values()
++            )
++
+     def open_sockets(self) -> int:
+         """Number of currently open TCP connections."""
+         with self._lock:
+diff --git a/src/doipbench/uds/constants.py b/src/doipbench/uds/constants.py
+index cd9e2b2..885d2d8 100755
+--- a/src/doipbench/uds/constants.py
++++ b/src/doipbench/uds/constants.py
+@@ -10,6 +10,7 @@ class ServiceId(IntEnum):
+ 
+     DIAGNOSTIC_SESSION_CONTROL = 0x10
+     ECU_RESET = 0x11
++    CLEAR_DIAGNOSTIC_INFORMATION = 0x14
+     SECURITY_ACCESS = 0x27
+     ROUTINE_CONTROL = 0x31
+     READ_DATA_BY_IDENTIFIER = 0x22
+diff --git a/src/doipbench/uds/security.py b/src/doipbench/uds/security.py
+index 34f671a..09f9395 100755
+--- a/src/doipbench/uds/security.py
++++ b/src/doipbench/uds/security.py
+@@ -8,6 +8,7 @@ library (or a HSM-backed service) behind the same interface.
+ from __future__ import annotations
+ 
+ import hashlib
++import secrets
+ 
+ from ..config import SecurityConfig
+ 
+@@ -22,20 +23,29 @@ def compute_key(seed: bytes, secret: bytes) -> bytes:
+ 
+ 
+ class SeedGenerator:
+-    """Deterministic seed source.
++    """Seed source for service 0x27.
+ 
+-    Seeds are reproducible for a given ``(secret, counter)`` pair, which keeps
+-    failing test cases debuggable, but never repeat within a power cycle.
++    Seeds are deterministic for a given ``(secret, counter)`` pair so a failing
++    case can be reproduced, but the counter starts at a random offset per power
++    cycle.  Without that offset the first seed after every reset is
++    ``SHA256(secret || 00000001)`` - a constant that can be computed offline
++    from the published secret, which turns 27 01/27 02 into a replayable pair.
+     """
+ 
+-    def __init__(self, config: SecurityConfig) -> None:
++    def __init__(self, config: SecurityConfig, start: int | None = None) -> None:
+         self._config = config
+-        self._counter = 0
++        self._counter = self._initial_counter() if start is None else start
++        self._fixed_start = start
++
++    @staticmethod
++    def _initial_counter() -> int:
++        # 0xFFFFFFFF is reserved for "unused"; any other value is a valid start.
++        return secrets.randbelow(0xFFFF_FFFF - 1) + 1
+ 
+     def next_seed(self) -> bytes:
+-        self._counter += 1
++        self._counter = (self._counter + 1) & 0xFFFFFFFF
+         digest = hashlib.sha256(self._config.secret + self._counter.to_bytes(4, "big")).digest()
+         return digest[: self._config.seed_length]
+ 
+     def reset(self) -> None:
+-        self._counter = 0
++        self._counter = self._initial_counter() if self._fixed_start is None else self._fixed_start
+diff --git a/src/doipbench/uds/server.py b/src/doipbench/uds/server.py
+index fc470c6..696ce45 100755
+--- a/src/doipbench/uds/server.py
++++ b/src/doipbench/uds/server.py
+@@ -38,7 +38,7 @@ Handler = Callable[[bytes], bytes]
+ class _Download:
+     """一次 0x34 → 0x36* → 0x37 刷写事务的连接级状态。
+ 
+-    next_counter 不是"已收到几块"，而是要 tester 下一块用的
++    ``next_counter`` 不是"已收到几块"，而是要 tester 下一块用的
+     blockSequenceCounter：从 0x01 开始，0xFF 之后回 0x00，0x00 之后回 0x01。
+     拿"块数"去比对是这块最常见的实现错误。
+     """
+@@ -83,7 +83,7 @@ class UdsServer:
+         self.last_activity = clock()
+         self._seeds = SeedGenerator(config.security)
+         self._download: _Download | None = None
+-        #: 懒分配：只有真发起 0x34 才占这块内存。
++        #: 懒分配：只有真发起 0x34 才占这块内存，几百个测试实例不至于各占 64 KB。
+         self._flash: bytearray | None = None
+         self._handlers: dict[int, Handler] = {
+             ServiceId.DIAGNOSTIC_SESSION_CONTROL: self._diagnostic_session_control,
+@@ -96,6 +96,7 @@ class UdsServer:
+             ServiceId.TRANSFER_DATA: self._transfer_data,
+             ServiceId.REQUEST_TRANSFER_EXIT: self._request_transfer_exit,
+             ServiceId.ECU_RESET: self._ecu_reset,
++            ServiceId.CLEAR_DIAGNOSTIC_INFORMATION: self._clear_diagnostic_information,
+             ServiceId.ROUTINE_CONTROL: self._routine_control,
+         }
+ 
+@@ -125,12 +126,25 @@ class UdsServer:
+     def reset(self) -> None:
+         """Return to the default session and lock security access."""
+         self._reset_to_default()
++        # 只有"工厂重置"才清安全计数。0x10 切会话走的也是 _reset_to_default，
++        # 但那条路不能清，否则切一次会话就把 0x27 的锁定绕过去了。
++        self.failed_attempts = 0
++        self.lockout_until = 0.0
+         self.last_activity = self._clock()
+         self._seeds.reset()
+ 
+     # ------------------------------------------------------------- internals
+     def _reset_to_default(self) -> None:
+-        # 故意不重置 failed_attempts / lockout_until：切会话不能解除安全锁定。
++        """Full reset: back to the default session, security locked.
++
++        Used by the S3 timer and by 0x11, i.e. the two events that really do
++        mean "this ECU just went back to square one".  A 0x10 that merely
++        changes session must NOT call this - see ``_diagnostic_session_control``
++        for why.
++
++        ``failed_attempts`` / ``lockout_until`` are deliberately untouched:
++        they are brute force counters, not session state.
++        """
+         self.session = Session.DEFAULT
+         self.security_level = 0
+         self.pending_seed = None
+@@ -167,8 +181,18 @@ class UdsServer:
+         except ValueError as exc:
+             raise UdsNegativeResponse(NRC.SUB_FUNCTION_NOT_SUPPORTED) from exc
+ 
+-        self._reset_to_default()
++        # ISO 14229-1 的会话迁移表只在**回到默认会话**时要求复位安全访问。
++        # 扩展 -> 编程 是真实 OEM 的常规序列（扩展会话里解锁，再切编程会话
++        # 做下载），如果切会话就清 security_level，34 必然回 0x33。原来这里
++        # 无条件调用 _reset_to_default()，正好把这个坑埋进了自己写的 flash()
++        # 里（它走 10 02 -> 27，绕开了），所以 213 条用例一条都没抓到。
++        #
++        # pending_seed 和半截刷写事务跟着会话走，无论切到哪都要丢掉。
+         self.session = session
++        self.pending_seed = None
++        self._download = None
++        if session is Session.DEFAULT:
++            self.security_level = 0
+         logger.debug("session changed to 0x%02X", target)
+ 
+         if self._suppress(raw):
+@@ -229,7 +253,7 @@ class UdsServer:
+         if now < self.lockout_until:
+             return True
+         if self.lockout_until:
+-            # 窗口已过：重新给满 max_attempts，否则错一次就再锁一轮。
++            # 窗口已经过去了：把尝试次数补满，否则下一次输错又立刻触发一整轮锁定。
+             self.failed_attempts = 0
+             self.lockout_until = 0.0
+         return False
+@@ -314,7 +338,8 @@ class UdsServer:
+     def _report_dtc_count(self, request: bytes) -> bytes:
+         if len(request) != 3:
+             raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
+-        # 响应首字节是服务端支持哪些 status bit，跟请求 mask 无关。
++        # 响应首字节是"服务端支持哪些 status bit"，跟请求里带什么 mask 无关。
++        # 回显请求 mask 会让 tester 以为 ECU 只支持它查的那一位，后续掩码全算错。
+         available = self.config.dtc_status_availability_mask
+         count = len(self.state.dtcs(request[2]))
+         return bytes([available, 0x01]) + count.to_bytes(2, "big")
+@@ -506,6 +531,21 @@ class UdsServer:
+             return b""
+         return self._positive(ServiceId.ECU_RESET, sub)
+ 
++    # ---------------------------------------------------------------- 0x14
++    def _clear_diagnostic_information(self, request: bytes) -> bytes:
++        # ISO 14229-1: groupOfDTC 是 3 字节，0xFFFFFF 表示"清全部"。
++        # 原来只有 0x19 没有 0x14，维修闭环"读故障 -> 修 -> 清故障 -> 复读"
++        # 走到第二步就断了，这里补上闭合。
++        if len(request) != 4:
++            raise UdsNegativeResponse(NRC.INCORRECT_MESSAGE_LENGTH)
++        group = int.from_bytes(request[1:4], "big")
++        if group != 0xFFFFFF:
++            known = {dtc.code for dtc in self.state.all_dtcs()}
++            if group not in known:
++                raise UdsNegativeResponse(NRC.REQUEST_OUT_OF_RANGE)
++        self.state.clear_dtcs(group)
++        return self._positive(ServiceId.CLEAR_DIAGNOSTIC_INFORMATION)
++
+     # ---------------------------------------------------------------- 0x31
+     def _routine_control(self, request: bytes) -> bytes:
+         """RoutineControl：这里只实现刷写用的 FF00 擦除和 FF01 校验。
+diff --git a/src/doipbench/uds/state.py b/src/doipbench/uds/state.py
+index 00967e3..5c0a9ef 100755
+--- a/src/doipbench/uds/state.py
++++ b/src/doipbench/uds/state.py
+@@ -56,3 +56,18 @@ class EcuState:
+                 if dtc.code == code:
+                     return copy.deepcopy(dtc)
+             return None
++
++    def clear_dtcs(self, group: int) -> int:
++        """Drop DTCs in ``group`` and return how many were removed.
++
++        ``group == 0xFFFFFF`` is the standard "clear all" request.  Otherwise
++        the three byte group is read as a DTC number, which is what 0x14 means
++        when it is not the all-group mask.
++        """
++        with self._lock:
++            before = len(self._dtcs)
++            if group == 0xFFFFFF:
++                self._dtcs = []
++            else:
++                self._dtcs = [dtc for dtc in self._dtcs if dtc.code != group]
++            return before - len(self._dtcs)
+diff --git a/tests/conformance/test_doip_conformance.py b/tests/conformance/test_doip_conformance.py
+index e430401..e2f8377 100755
+--- a/tests/conformance/test_doip_conformance.py
++++ b/tests/conformance/test_doip_conformance.py
+@@ -8,6 +8,7 @@ diagnostic NACK.
+ 
+ from __future__ import annotations
+ 
++import socket
+ import struct
+ import time
+ 
+@@ -25,11 +26,13 @@ from doipbench.doip import (
+     EntityStatus,
+ )
+ from doipbench.doip.constants import (
++    DiagnosticAckCode,
+     DiagnosticNackCode,
+     GenericNackCode,
+     PayloadType,
+     RoutingActivationResponseCode,
+ )
++from doipbench.uds.security import compute_key
+ 
+ 
+ def _routing_payload(client_address: int, activation_type: int = 0x00) -> bytes:
+@@ -122,10 +125,12 @@ def test_routing_activation_with_oem_specific_data(client: DoIPClient) -> None:
+ @pytest.mark.conformance
+ @allure.feature("DoIP conformance")
+ @allure.story("Routing activation")
+-def test_duplicate_routing_activation_is_denied(client: DoIPClient) -> None:
++def test_duplicate_routing_activation_is_idempotent(client: DoIPClient) -> None:
++    # 同一条 socket 上用同一个 SA 重申是幂等的：0x03 的定义是"该 SA 已在
++    # **另一条** socket 上激活"，把它用在这里会让 tester 重发一次就掉线。
+     assert client.routing_activation().accepted
+     second = client.routing_activation()
+-    assert second.response_code == RoutingActivationResponseCode.DENIED_SA_ALREADY_REGISTERED
++    assert second.accepted
+ 
+ 
+ @pytest.mark.conformance
+@@ -192,6 +197,51 @@ def test_diagnostic_to_unknown_target_is_nacked(routed_client: DoIPClient) -> No
+     assert error.value.code == DiagnosticNackCode.UNKNOWN_TARGET_ADDRESS
+ 
+ 
++@pytest.mark.conformance
++@allure.feature("DoIP conformance")
++@allure.story("Diagnostic acknowledgement")
++def test_diagnostic_message_is_acknowledged_before_the_response(
++    routed_client: DoIPClient, ecu_config: EcuConfig
++) -> None:
++    """0x8002 first, 0x8001 carrying the UDS answer second.
++
++    ``doipclient`` blocks on the acknowledgement and drops anything else
++    as "unexpected", so an entity that answers with 0x8001 alone looks exactly
++    like an entity that never answered.
++    """
++    routed_client.send_diagnostic(b"\x22\xf1\x90")
++
++    ack = routed_client.receive_frame()
++    assert ack.payload_type == PayloadType.DIAGNOSTIC_MESSAGE_ACK
++    assert ack.payload == (
++        ecu_config.logical_address.to_bytes(2, "big")
++        + routed_client.client_address.to_bytes(2, "big")
++        + bytes([DiagnosticAckCode.ACCEPTED])
++    )
++
++    response = routed_client.receive_frame()
++    assert response.payload_type == PayloadType.DIAGNOSTIC_MESSAGE
++    assert response.payload[4:].startswith(b"\x62\xf1\x90")
++
++
++@pytest.mark.conformance
++@allure.feature("DoIP conformance")
++@allure.story("Diagnostic acknowledgement")
++def test_acknowledgement_can_be_disabled_for_internal_nodes() -> None:
++    """A node behind a gateway must not ack: the edge node already did.
++
++    Two acknowledgements for one request upset the tester's P6Client timer,
++    which is why ISO 13400-2 leaves this configurable per node role.
++    """
++    config = default_config(ack_diagnostic_messages=False)
++    with DoIPServer(config) as server, DoIPClient(port=server.port, timeout=2.0) as client:
++        assert client.routing_activation().accepted
++        client.send_diagnostic(b"\x22\xf1\x90")
++        frame = client.receive_frame()
++        assert frame.payload_type == PayloadType.DIAGNOSTIC_MESSAGE
++        assert frame.payload[4:].startswith(b"\x62\xf1\x90")
++
++
+ @pytest.mark.conformance
+ @allure.feature("DoIP conformance")
+ @allure.story("Diagnostic messages")
+@@ -318,7 +368,12 @@ def test_fourth_socket_is_denied_when_three_are_active() -> None:
+     """A separate ECU instance keeps the assertion independent of other tests."""
+     config = default_config(max_concurrent_sockets=3)
+     with DoIPServer(config) as server:
+-        clients = [DoIPClient(port=server.port).connect() for _ in range(4)]
++        # 每个 client 用不同的 SA：同一个 SA 在第二条 socket 上会被 0x03 拒掉，
++        # 那样就测不到"socket 名额已满"这条路径了。
++        clients = [
++            DoIPClient(port=server.port, client_address=0x0E00 + index).connect()
++            for index in range(4)
++        ]
+         try:
+             for client in clients[:3]:
+                 assert client.routing_activation().accepted
+@@ -335,7 +390,11 @@ def test_fourth_socket_is_denied_when_three_are_active() -> None:
+ @allure.feature("DoIP conformance")
+ @allure.story("Alive check")
+ def test_alive_check_on_unactivated_connection_closes_it(client: DoIPClient) -> None:
+-    """未路由激活就发 0x0007，服务端应关闭连接，而不是回 0x0008 + 0x0000。"""
++    """未路由激活就发 0x0007，服务端应关闭连接。
++
++    以前这里会回一个 0x0008 + 0x0000，等于告诉 tester「ECU 的逻辑地址是
++    0x0000」，比不响应更糟：静默关闭至少让 tester 知道连接没激活。
++    """
+     client.send_frame(DoIPFrame(PayloadType.ALIVE_CHECK_REQUEST))
+     with pytest.raises(DoIPConnectionClosed):
+         client.receive_frame()
+@@ -354,7 +413,9 @@ def test_idle_connection_is_reclaimed_after_inactivity_timeout() -> None:
+     config = default_config(max_concurrent_sockets=1, inactivity_timeout=0.5)
+     with DoIPServer(config) as server:
+         idle = DoIPClient(port=server.port, timeout=2.0).connect()
+-        second = DoIPClient(port=server.port, timeout=2.0).connect()
++        # 换一个 SA：同 SA 第二条连接会被 0x03 拦下（那是另一条用例），
++        # 这里要观察的是并发名额，不是 SA 冲突。
++        second = DoIPClient(port=server.port, timeout=2.0, client_address=0x0E01).connect()
+         try:
+             assert idle.routing_activation().accepted
+ 
+@@ -394,3 +455,192 @@ def test_active_connection_survives_inactivity_timeout() -> None:
+         while time.monotonic() < deadline:
+             assert client.alive_check() == client.client_address
+             time.sleep(0.2)
++
++
++# ---------------------------------------------------------------- raw probes
++#
++# 下面几条用裸 socket 而不是 DoIPClient：它们要验证的正是"客户端库不可能
++# 自己发出来"的报文（2019 版开头、功能寻址、复位后的断链）。用自带客户端
++# 测这些等于让出题人自己答题。
++
++
++def _raw_connect(server: DoIPServer) -> socket.socket:
++    return socket.create_connection(("127.0.0.1", server.port), timeout=2.0)
++
++
++def _raw_send(sock: socket.socket, version: int, payload_type: int, payload: bytes) -> None:
++    header = struct.pack(">BBHI", version, (~version) & 0xFF, payload_type, len(payload))
++    sock.sendall(header + payload)
++
++
++def _raw_recv(sock: socket.socket) -> tuple[int, int, bytes]:
++    header = b""
++    while len(header) < 8:
++        chunk = sock.recv(8 - len(header))
++        if not chunk:
++            raise DoIPConnectionClosed("peer closed while reading header")
++        header += chunk
++    version, _inverse, payload_type, length = struct.unpack(">BBHI", header)
++    body = b""
++    while len(body) < length:
++        chunk = sock.recv(length - len(body))
++        if not chunk:
++            raise DoIPConnectionClosed("peer closed while reading payload")
++        body += chunk
++    return version, payload_type, body
++
++
++def _raw_uds(sock: socket.socket, request: bytes, target: int = 0x1001) -> bytes:
++    """Send one UDS request, skip the 0x8002 ack, return the UDS response."""
++    _raw_send(
++        sock,
++        0x03,
++        PayloadType.DIAGNOSTIC_MESSAGE,
++        b"\x0e\x00" + target.to_bytes(2, "big") + request,
++    )
++    while True:
++        _version, payload_type, body = _raw_recv(sock)
++        if payload_type == PayloadType.DIAGNOSTIC_MESSAGE:
++            return body[4:]
++
++
++def _activate(sock: socket.socket, client_address: int = 0x0E00) -> None:
++    _raw_send(sock, 0x03, PayloadType.ROUTING_ACTIVATION_REQUEST, _routing_payload(client_address))
++    _raw_recv(sock)
++
++
++@pytest.mark.conformance
++@allure.feature("DoIP conformance")
++@allure.story("Protocol version")
++def test_iso_13400_2_2019_handshake_is_accepted() -> None:
++    """0x03 是 2019 版的开头，2019 以后的工具链默认用它。
++
++    只认 0x02 时这类 tester 连握手都过不去，而且拿不到任何错误码——现象和
++    "ECU 没上电"一模一样。响应也必须回 0x03，回 0x02 同样会被对端丢弃。
++    """
++    with DoIPServer(default_config()) as server:
++        sock = _raw_connect(server)
++        try:
++            _raw_send(sock, 0x03, PayloadType.ROUTING_ACTIVATION_REQUEST, _routing_payload(0x0E00))
++            version, payload_type, body = _raw_recv(sock)
++        finally:
++            sock.close()
++
++    assert version == 0x03
++    assert payload_type == PayloadType.ROUTING_ACTIVATION_RESPONSE
++    assert body[4] == RoutingActivationResponseCode.ACCEPTED
++
++
++@pytest.mark.conformance
++@allure.feature("DoIP conformance")
++@allure.story("Functional addressing")
++def test_functional_address_reaches_the_ecu() -> None:
++    """真实 tester 的第一帧永远是功能寻址的 10 03。
++
++    只认单播时 TA=0xE400 会回 0x8003，后面整条序列一步都走不了。响应里的
++    SA 必须是回应的那台 ECU，而不是 0xE400——tester 靠 SA 判断谁答的。
++    """
++    with DoIPServer(default_config()) as server:
++        sock = _raw_connect(server)
++        try:
++            _activate(sock)
++            _raw_send(
++                sock,
++                0x03,
++                PayloadType.DIAGNOSTIC_MESSAGE,
++                b"\x0e\x00" + b"\xe4\x00" + b"\x10\x03",
++            )
++            while True:
++                _version, payload_type, body = _raw_recv(sock)
++                if payload_type == PayloadType.DIAGNOSTIC_MESSAGE:
++                    break
++        finally:
++            sock.close()
++
++    assert body[0:2] == b"\x10\x01"  # SA 是 ECU 自己
++    assert body[2:4] == b"\x0e\x00"  # TA 是 tester
++    assert body[4:6] == b"\x50\x03"
++
++
++@pytest.mark.conformance
++@allure.feature("UDS conformance")
++@allure.story("Session control")
++def test_security_access_survives_extended_to_programming() -> None:
++    """扩展 -> 解锁 -> 编程 -> 34 是真实 OEM 的常规刷写序列。
++
++    ISO 14229-1 只在**回到默认会话**时才要求复位安全访问。切会话就清
++    security_level 会让这里必然 0x33，而自己写的 shell 走 10 02 -> 27
++    绕开了这条路径，所以用例集原本一条都没抓到。
++    """
++    config = default_config()
++    with DoIPServer(config) as server:
++        sock = _raw_connect(server)
++        try:
++            _activate(sock)
++            assert _raw_uds(sock, b"\x10\x03")[:2] == b"\x50\x03"
++            seed = _raw_uds(sock, b"\x27\x01")[2:]
++            key = compute_key(seed, config.security.secret)
++            assert _raw_uds(sock, b"\x27\x02" + key)[:2] == b"\x67\x02"
++            assert _raw_uds(sock, b"\x10\x02")[:2] == b"\x50\x02"
++            download = bytes.fromhex("340044") + (0).to_bytes(4, "big") + (16).to_bytes(4, "big")
++            assert _raw_uds(sock, download)[0] == 0x74
++        finally:
++            sock.close()
++
++
++@pytest.mark.conformance
++@allure.feature("UDS conformance")
++@allure.story("Clear diagnostic information")
++def test_clear_diagnostic_information_empties_the_dtc_list() -> None:
++    """读得出、清不掉，维修闭环就断在第二步。"""
++    with DoIPServer(default_config()) as server:
++        sock = _raw_connect(server)
++        try:
++            _activate(sock)
++            assert _raw_uds(sock, b"\x19\x02\x09")[3:] != b""  # 先确认有 DTC
++            assert _raw_uds(sock, b"\x14\xff\xff\xff") == b"\x54"
++            assert _raw_uds(sock, b"\x19\x02\x09")[3:] == b""
++        finally:
++            sock.close()
++
++
++@pytest.mark.conformance
++@allure.feature("UDS conformance")
++@allure.story("ECU reset")
++def test_ecu_reset_closes_the_connection() -> None:
++    """真 ECU 复位会断链，刷写工具靠"等 socket 关闭"判断复位完成。
++
++    不断链时它只能一直等到 P2* 超时，日志里表现为"复位后无响应"。
++    """
++    with DoIPServer(default_config()) as server:
++        sock = _raw_connect(server)
++        try:
++            _activate(sock)
++            assert _raw_uds(sock, b"\x11\x01") == b"\x51\x01"
++            with pytest.raises(DoIPConnectionClosed):
++                _raw_recv(sock)
++        finally:
++            sock.close()
++
++
++@pytest.mark.conformance
++@allure.feature("DoIP conformance")
++@allure.story("Routing activation")
++def test_same_source_address_on_second_socket_is_denied() -> None:
++    """0x03 的含义是"该 SA 已在另一条 socket 上激活"，不是"本 socket 重申"。
++
++    原来这两件事写反了：同一 SA 开两条连接都能拿到 0x10，而同一 socket
++    重发一次反而被拒——tester 只要重试一次就掉线。
++    """
++    with DoIPServer(default_config()) as server:
++        first = DoIPClient(port=server.port, client_address=0x0E00).connect()
++        second = DoIPClient(port=server.port, client_address=0x0E00).connect()
++        try:
++            assert first.routing_activation().accepted
++            assert (
++                second.routing_activation().response_code
++                == RoutingActivationResponseCode.DENIED_SA_ALREADY_REGISTERED
++            )
++        finally:
++            first.close()
++            second.close()
+diff --git a/tests/conftest.py b/tests/conftest.py
+index ae08875..d5c89c0 100755
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -8,12 +8,45 @@ suite fast (no rebinding per case) without leaking state between tests.
+ from __future__ import annotations
+ 
+ import socket
++import sys
+ import time
++import types
+ from collections.abc import Iterator
+ from pathlib import Path
+ 
+ import pytest
+ 
++# allure 是报告插件，不该成为"能不能跑测试"的前提。只装运行依赖
++# (pip install -e .) 时它不在，测试目录连收集都会失败；这里注入一个空壳，
++# 把 @allure.step / @allure.feature 变成直通装饰器。装了 allure-pytest 的
++# 环境不受影响，走的仍是真正的包。
++try:  # pragma: no cover - depends on how the environment was built
++    import allure  # noqa: F401
++except ModuleNotFoundError:  # pragma: no cover
++
++    def _identity(*args: object, **kwargs: object) -> object:
++        """Accept both ``@allure.step`` and ``@allure.step("text")``."""
++        if len(args) == 1 and not kwargs and callable(args[0]):
++            return args[0]
++        return lambda func: func
++
++    def _sink(*_args: object, **_kwargs: object) -> None:
++        return None
++
++    class _Dynamic:
++        description = staticmethod(_sink)
++        severity = staticmethod(_sink)
++        tag = staticmethod(_sink)
++        title = staticmethod(_sink)
++
++    _stub = types.ModuleType("allure")
++    for _name in ("step", "feature", "story", "title", "severity", "description", "link"):
++        setattr(_stub, _name, _identity)
++    _stub.attach = _sink
++    _stub.attachment_type = types.SimpleNamespace(TEXT="text", JSON="json", PNG="png")
++    _stub.dynamic = _Dynamic()
++    sys.modules["allure"] = _stub
++
+ from doipbench.config import EcuConfig, SecurityConfig, default_config
+ from doipbench.doip import DoIPClient, DoIPServer
+ from doipbench.uds import Session, compute_key
+diff --git a/tools/uds_shell.py b/tools/uds_shell.py
+index 563c97a..c161ee0 100644
+--- a/tools/uds_shell.py
++++ b/tools/uds_shell.py
+@@ -202,7 +202,7 @@ def flash(client, path, address, secret):
+     print("[6] 31 01 FF01    verify      ok")
+ 
+     send(client, b"\x11\x01")
+-    print("\nprogrammed. switch back with 10 01 when you are done.")
++    print("\nprogrammed. ECU reset and closed the connection - restart the shell to continue.")
+     return True
+ 
+ 

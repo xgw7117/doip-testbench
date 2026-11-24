@@ -1,10 +1,10 @@
 # doip-testbench
 
-用 Python 从零实现的 DoIP 实体（ISO 13400-2）和一个虚拟 ECU，配 213 条自动化用例，外加一个能直接敲命令的交互终端。不需要 CANoe，不需要硬件，clone 下来两分钟能跟一个"车"对话。
+用 Python 从零实现的 DoIP 实体（ISO 13400-2）和一个虚拟 ECU，配 221 条自动化用例，外加一个能直接敲命令的交互终端。**CANoe 教你协议，帮不了你 CI；这个能。** 不需要硬件，clone 下来两分钟能跟一个"车"对话。
 
 ![CI](https://github.com/xgw7117/doip-testbench/actions/workflows/ci.yml/badge.svg) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
-在线报告：[Allure · 213 passed](https://xgw7117.github.io/doip-testbench/)
+在线报告：[Allure · 221 passed](https://xgw7117.github.io/doip-testbench/)
 
 ## 先看它能干什么
 
@@ -38,7 +38,7 @@ programmed.
 - **被 tester 发现**：UDP 13400 应答车辆识别 / 实体状态 / 电源模式——tester 此时还不知道 ECU 的 IP，广播是唯一的路
 - **接受诊断**：TCP 13400 路由激活，UDS 十一个服务，含 `31 01 FF00 → 34 → 36* → 37 → 31 01 FF01 → 11` 完整刷写链路
 - **当网关**：按目标逻辑地址转发给下挂 ECU，回程响应改写 SA / TA，未知地址回 `0x8003`
-- **当被测对象**：213 条用例直接打它，覆盖 13 类 NRC、超长传输、块计数器乱序、空闲连接回收
+- **当被测对象**：221 条用例直接打它，覆盖 13 类 NRC、超长传输、块计数器乱序、空闲连接回收
 
 ## 快速开始
 
@@ -48,7 +48,7 @@ cd doip-testbench
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest          # 213 passed
+pytest          # 221 passed
 ```
 
 不需要硬件，也不用 root 或 vcan，测试都在 127.0.0.1 的临时端口上跑。
@@ -83,14 +83,12 @@ doipbench run tests/data/uds_cases.yaml --start-ecu --port 0
 
 | 协议                         | 做了什么                                                                                                                |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| DoIP over TCP（ISO 13400-2） | 8 字节头解析与组帧、路由激活、诊断消息、**诊断消息确认（0x8002）**、Alive Check、0x8001 / 0x8003；按目标逻辑地址转发（网关模式）                                 |
+| DoIP over TCP（ISO 13400-2） | 8 字节头解析与组帧（**接受 0x02 / 0x03，按请求版本回帧**）、路由激活、诊断消息、**诊断消息确认（0x8002）**、**功能寻址 0xE400 / 0xDFFF**、Alive Check、0x8001 / 0x8003；按目标逻辑地址转发（网关模式）                                 |
 | DoIP over UDP（ISO 13400-2） | 车辆识别（0x0001 / 0x0002 / 0x0003）、实体状态、电源模式；TCP 专属报文走 UDP 一律回 generic NACK 0x01                                        |
-| UDS（ISO 14229-1）           | 0x10 会话、0x27 安全访问、0x22 读数据、0x2E 写数据、0x19 读 DTC、0x3E 保持连接；0x34 / 0x36 / 0x37 刷写数据传输、0x31 擦除与 CRC 校验、0x11 复位；13 类 NRC |
-| SOME/IP                    | 头部和 SD 报文的编解码，**没有做服务端**                                                                                            |
-| gPTP / VLAN                | IEEE 802.1AS 头部解析、802.1Q 标签                                                                                         |
-| ISO-TP（ISO 15765-2）        | 分段和重组，用于理解 CAN 侧的长报文传输                                                                                              |
+| UDS（ISO 14229-1）           | 0x10 会话、0x27 安全访问、0x22 读数据、0x2E 写数据、0x19 读 DTC、**0x14 清 DTC**、0x3E 保持连接；0x34 / 0x36 / 0x37 刷写数据传输、0x31 擦除与 CRC 校验、0x11 复位（**复位后关连接**）；13 类 NRC |
+| SOME/IP、gPTP / VLAN、ISO-TP  | **独立实现，未接入 DoIP 链路**，只被单元测试覆盖。读相邻协议用，不算这个台子的能力                                                                        |
 
-## 三个刻意的设计选择
+## 四个刻意的设计选择
 
 **1. 0x8002 的 SA 填自己，不填请求里的目标地址。**
 
@@ -104,14 +102,20 @@ doipbench run tests/data/uds_cases.yaml --start-ecu --port 0
 
 ECU 只在"5 秒没收到任何请求"时退回默认会话，这是防止 tester 崩溃后一直停在编程会话、保持解锁状态。保活是 tester 的责任（周期发 `3E 80`），不是 ECU 的。
 
+**4. 切会话不复位安全访问，只有回默认会话才复位。**
+
+ISO 14229-1 的会话迁移表就是这么写的，但直觉相反：`10 03 -> 27 -> 10 02 -> 34` 是真实 OEM 很常见的刷写序列，切一次会话就把解锁状态清掉，`34` 必然回 `0x33`。
+
+这条**写错过一次**。更值得记的是它为什么没被发现：`tools/uds_shell.py` 的 `flash()` 走的是 `10 02 -> 27`，正好绕开了这条路径，于是用例集和工具链从同一个错误认知里长出来，互相印证，全绿。现在有一条回归用例专门钉住它。
+
 ## 测试
 
-一共 213 条，跑完 `pytest` 的最后一行就是这个数：
+一共 221 条，跑完 `pytest` 的最后一行就是这个数：
 
 | 层     | 条数  | 测什么                                                    | 位置                   |
 | ----- | --- | ------------------------------------------------------ | -------------------- |
 | 单元    | 114 | 编解码、状态机、YAML 加载器，不碰网络                                  | `tests/unit/`        |
-| 协议一致性 | 85  | UDS 服务用例（YAML 数据驱动）、TCP 报文用例、UDP 报文用例、0x8002 确认的正反两个方向 | `tests/conformance/` |
+| 协议一致性 | 93  | UDS 服务用例（YAML 数据驱动）、TCP 报文用例、UDP 报文用例、0x8002 确认的正反两个方向、双协议版本、功能寻址、2019 版握手 | `tests/conformance/` |
 | 端到端   | 14  | 会话切换、安全锁定、两个 tester 同时连接、网关转发                          | `tests/functional/`  |
 
 GitHub Actions 上用 Python 3.10 / 3.11 / 3.12 各跑一遍。
@@ -137,9 +141,9 @@ cases:
 src/doipbench/
 ├── doip/         帧解析、服务端、客户端
 ├── uds/          十一个服务、会话与安全状态机
-├── someip/       SOME/IP 头 + SD
-├── net/          VLAN、gPTP
-├── transport/    ISO-TP
+├── someip/       SOME/IP 头 + SD（未接入 DoIP 链路）
+├── net/          VLAN、gPTP（未接入）
+├── transport/    ISO-TP（未接入）
 ├── testing/      YAML 用例加载
 ├── config.py     ECU 配置
 └── cli.py        serve / run / identify / frame
@@ -156,11 +160,15 @@ tests/
 
 ## 已知限制
 
-- 没有和真实 ECU 对接过。这台"车"是纯软件。
-- 安全访问用的是 `SHA-256(secret ‖ seed)` 拼接派生。这个构造有长度扩展风险，生产环境应改 HMAC-SHA256 或 AES-CMAC。`SecurityConfig.key_version` 经 DID `0xF1A0` 公布，tester 启动时比对，版本不一致会直接报出来，而不是回一个看不出原因的 `0x35`。
+这一节是照着实测探针写的，不是照着"想做但没做"写的。每条都能被复现。
+
+- **没有和真实 ECU 对接过。** 这台"车"是纯软件，`tools/interop_check.py` 里的 `python-doipclient` 是唯一的第三方参照，而且只有 5 步。
+- **SOME/IP、gPTP / VLAN、ISO-TP 三个模块没有接入 DoIP 链路。** 它们在 `src/` 里零引用，只被自己的单元测试覆盖。读相邻协议用，不算这个台子的能力。
+- **一致性用例多数由本项目自带客户端发出。** 验证的是"我的编码器和我的解码器互相同意"，不是"标准同意"。新增的 6 条改用裸 socket，专测客户端库自己发不出来的报文（2019 版开头、功能寻址、复位断链）。
+- **安全访问的种子可预测。** 算法是 `key = seed XOR SHA-256(secret ‖ seed)`，XOR 截断本身消解了长度扩展攻击——真正的洞在别处：计数器从 0 起、secret 在源码里，于是每轮上电的第一颗种子恒定，抓一对 `27 01/27 02` 就能永久重放。计数器已改为随机起始，但 secret 仍在源码里，生产环境该放 HSM。
 - 刷写数据只落在内存里一块 `flash_size` 的缓冲区，**断电即丢**。指纹写入、刷写依赖检查、段地址映射、NVM 持久化都没做，所以它不是能刷真 ECU 的刷写器。
 - 网关是**进程内的逻辑地址路由**：按目标地址把请求分发到下挂的 UDS 实例，不是真的两跳网络。DoIP 的 entity 多跳（跨 entity 转发）没做。
-- Alive Check 只做被动的 `0x0007 → 0x0008` 应答，不主动发探活包。
+- Alive Check 只做被动的 `0x0007 -> 0x0008` 应答，不主动发探活包。
 - 空闲连接靠 `inactivity_timeout`（默认 300 s，`None` 关闭）回收——拔线 / 掉电的 tester 不会发 FIN 或 RST，否则只能等内核重传耗尽（约 15 分钟），期间一直占着 `max_concurrent_sockets` 的名额。
 - UDP 只放发现类报文。诊断和 Alive Check 只能走 TCP，往 UDP 上发会收到 generic NACK——不是没实现，是标准不允许。
 - 网关模式没有 CLI 开关，要在代码里传路由表：
@@ -179,6 +187,8 @@ with DoIPServer(config, port=13400) as server:
 真车上没有人"知道"密钥。ECU 侧烧进 HSM / SHE 的密钥槽，写入后读不出来；tester 侧是 OEM 发的 `SeedKey.dll`，算法可调用、密钥不可见。两边靠**密钥版本号**对齐，不靠人记。
 
 本项目实现了版本号这一层：`SecurityConfig.key_version` 经 DID `0xF1A0` 公布，`uds_shell` 启动时读一次，对不上就打印 `key version: ECU v2, local v1  MISMATCH`。
+
+种子本身也做了处理：计数器每轮上电从随机值起，所以第一颗种子不再是一个可以离线算出来的常量。但 secret 仍然在 `config.py` 里——这一层必须靠 HSM，代码修不了。
 
 HSM、SeedKey DLL、密钥派生与轮换、解锁审计日志都没做，这些属于密钥管理系统（KMS），不在一个诊断测试台的范围内。
 
